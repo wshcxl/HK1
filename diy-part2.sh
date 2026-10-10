@@ -12,3 +12,12 @@
 
 # Modify default IP
 sed -i 's/192.168.1.1/192.168.50.101/g' package/base-files/files/bin/config_generate
+
+# 默认 LuCI 语言设为中文（zh_cn）
+LUCI_CFG=package/feeds/luci/luci-base/root/etc/config/luci
+if [ -f "$LUCI_CFG" ]; then
+  sed -i "s/option lang '[^']*'/option lang 'zh_cn'/" "$LUCI_CFG"
+  echo "已将默认语言设置为中文"
+else
+  echo "未找到 $LUCI_CFG，跳过语言设置"
+fi
