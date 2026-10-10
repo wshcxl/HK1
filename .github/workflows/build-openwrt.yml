@@ -1,16 +1,20 @@
 name: Build HK1 Box ImmortalWrt + OAF
 
 on:
-  repository_dispatch:
   workflow_dispatch:
     inputs:
+      zh_default:
+        description: '默认 LuCI 语言设为中文(zh_cn)。false=英文默认，true=中文默认（两种都内置中文语言包，可随时切换）'
+        type: boolean
+        default: false
+        required: true
       immortalwrt_branch:
         description: 'ImmortalWrt 源码分支'
         default: 'openwrt-24.10'
         required: true
       kernel:
-        description: '封装用的 Flippy 内核版本（需与 rootfs 的 6.6.x 对应，否则 OAF 内核模块可能无法加载）'
-        default: '6.6'
+        description: '封装用的 Flippy 内核系列（需与 rootfs 的 6.6.x 对应，否则 OAF 内核模块可能无法加载）'
+        default: '6.6.y'
         required: true
 
 jobs:
@@ -45,10 +49,22 @@ jobs:
           cd openwrt
           ../diy-part1.sh
 
-      - name: 写入 .config 并展开
+      # ⚠️ 关键修复：之前漏掉下面两步，导致 luci / OAF / 中文包 都没被加入编译树，
+      #    default-settings 找不到 luci 依赖而直接报错。必须先 update 再 install。
+      - name: 更新软件源 feeds
+        run: cd openwrt && ./scripts/feeds update -a
+
+      - name: 安装软件源 feeds
+        run: cd openwrt && ./scripts/feeds install -a
+
+      - name: 写入 .config 并展开（含 IP / 语言定制）
+        env:
+          ZH_DEFAULT: ${{ github.event.inputs.zh_default == 'true' && '1' || '' }}
         run: |
           cp .config openwrt/.config
           cd openwrt
+          echo "ZH_DEFAULT=[$ZH_DEFAULT]"
+          ../diy-part2.sh
           make defconfig
 
       - name: 下载依赖包
@@ -71,8 +87,9 @@ jobs:
         with:
           name: immortalwrt-rootfs
           path: artifact/*.tar.gz
+          if-no-files-found: error
 
-  # ── 第二步：用 ophub 脚本封装成 HK1 Box 启动镜像 ──
+  # ── 第二步：用 ophub 封装成 HK1 Box 启动镜像 ──
   package:
     needs: build-rootfs
     runs-on: ubuntu-22.04
@@ -87,30 +104,24 @@ jobs:
           name: immortalwrt-rootfs
           path: artifact
 
-      - name: 安装封装依赖
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y dosfstools e2fsprogs parted tar xz-utils bzip2 gzip coreutils mtools pv uuid-runtime
-
-      - name: 克隆 ophub 封装脚本
-        run: |
-          git clone --depth 1 https://github.com/ophub/amlogic-s9xxx-openwrt.git amlogic
-
-      - name: 放置 rootfs 供 ophub 使用
-        run: |
-          cd amlogic
-          mkdir -p openwrt-armvirt
-          cp ../artifact/*.tar.gz openwrt-armvirt/openwrt-armvirt-64-default-rootfs.tar.gz
-          ls -lh openwrt-armvirt
-
-      - name: 封装 HK1 Box 镜像
-        run: |
-          cd amlogic
-          sudo chmod +x make
-          sudo ./make -d -b hk1 -k "${{ github.event.inputs.kernel || '6.6' }}"
+      - name: 用 ophub 封装成 HK1 Box 启动镜像
+        id: package
+        uses: ophub/amlogic-s9xxx-openwrt@main
+        with:
+          openwrt_path: artifact/*.tar.gz
+          openwrt_board: s905x3-hk1
+          openwrt_kernel: ${{ github.event.inputs.kernel || '6.6.y' }}
+          openwrt_ip: 192.168.50.101
+          openwrt_size: 2048
 
       - name: 上传最终固件
         uses: actions/upload-artifact@v4
         with:
           name: hk1box-immortalwrt-oaf
-          path: amlogic/out/*.img*
+          path: ${{ env.PACKAGED_OUTPUTPATH }}/*.img*
+          if-no-files-found: error
+
+      - name: 输出固件信息
+        run: |
+          echo "固件产物目录: ${{ env.PACKAGED_OUTPUTPATH }}"
+          ls -lh ${{ env.PACKAGED_OUTPUTPATH }}
