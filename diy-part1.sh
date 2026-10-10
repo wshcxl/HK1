@@ -1,18 +1,12 @@
 #!/bin/bash
 #
-# Copyright (c) 2019-2020 P3TERX <https://p3terx.com>
-#
-# This is free software, licensed under the MIT License.
-# See /LICENSE for more information.
-#
-# https://github.com/P3TERX/Actions-OpenWrt
-# File name: diy-part1.sh
-# Description: OpenWrt DIY script part 1 (Before Update feeds)
+# HK1 Box ImmortalWrt 编译：diy-part1（更新 feeds 之前执行）
+# 作用：把 OAF(OpenAppFilter) 应用特征库仓库作为 feed 加进来
 #
 
-# Uncomment a feed source
-sed -i 's/^#\(.*helloworld\)/\1/' feeds.conf.default
-
-# Add a feed source
-#echo 'src-git helloworld https://github.com/fw876/helloworld' >>feeds.conf.default
+# 原有 passwall feed（保持不变）
 echo 'src-git passwall https://github.com/xiaorouji/openwrt-passwall' >>feeds.conf.default
+
+# 追加 OAF(OpenAppFilter) 应用特征库 feed
+# 仓库根目录下就是三个包：oaf(内核模块) / open-app-filter(守护进程+feature.bin特征库) / luci-app-oaf(LuCI界面)
+echo 'src-git oaf https://github.com/wshcxl/Open-App' >>feeds.conf.default
