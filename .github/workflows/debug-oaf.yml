@@ -40,10 +40,11 @@ jobs:
           ../diy-part2.sh
           make defconfig || true
 
-      - name: 打印 kmod-oaf 的 kconfig 片段（定位自引用）
+      - name: 打印 kmod-oaf 的 kconfig 块 + feed 内定义来源
         run: |
           cd openwrt
-          echo "===== grep kmod-oaf ====="
-          grep -n "kmod-oaf" tmp/.config-package.in | head -40
-          echo "===== 第 17190~17260 行 ====="
-          sed -n '17190,17260p' tmp/.config-package.in
+          echo "===== feed 内 kmod-oaf / KernelPackage/oaf 定义次数 ====="
+          grep -rn "KernelPackage/oaf\|PKG_NAME:=oaf\|kernel module" package/feeds/oaf/ 2>/dev/null | head
+          echo "===== 每个 config PACKAGE_kmod-oaf 块（含依赖/select）====="
+          grep -n -A 14 "config PACKAGE_kmod-oaf" tmp/.config-package.in
+
