@@ -159,6 +159,32 @@ fi
 [ -n "$HROOT" ] && [ -f "$HROOT/Makefile" ] || { echo "❌ 内核构建树不可用：$HROOT"; ls -l "$HROOT" 2>/dev/null | head -30 || true; exit 1; }
 echo "★ 内核构建树：$HROOT"
 ls -l "$HROOT" | head -n 30 || true
+# ---------------------------------------------------------------------------
+# ⚠️ 关键一步 0：禁止 make 去跑 syncconfig
+#    ophub 的 header 包只含 include/ + scripts/ + arch 头文件，**没有 Kconfig 树**。
+#    只要 make 认为配置需要刷新（include/config/auto.conf[/.cmd] 过期），它就会：
+#      1) 现编 scripts/kconfig/conf（这步没问题）
+#      2) 跑 syncconfig → "can't find file Kconfig" → 报错退出
+#      3) 顺手删掉 include/generated/autoconf.h
+#    结果：模块编译必然失败。这里把 Makefile 里所有跑 syncconfig 的**配方行**换成 echo
+#    （配方行以 tab 开头；规则行不动，保证 Makefile 语法不变）。
+echo "--- 打补丁：禁止 syncconfig（header 包里没有 Kconfig 树，不需要重新生成配置）---"
+python3 - "$HROOT/Makefile" <<'PYEOF'
+import sys
+p = sys.argv[1]
+lines = open(p, encoding='utf-8', errors='replace').read().split('\n')
+n = 0
+out = []
+for l in lines:
+    if 'syncconfig' in l and l[:1] == '\t':
+        out.append('\t@echo "（已跳过 syncconfig：header 包内没有 Kconfig 树）"')
+        n += 1
+    else:
+        out.append(l)
+open(p, 'w', encoding='utf-8', newline='\n').write('\n'.join(out))
+print('已替换 %d 行 syncconfig 配方' % n)
+PYEOF
+
 # 保险 1：ophub 的 header 包用 `tar -czf header-*.tar.gz *` 打的，通配符不含点开头的文件，
 #         所以包里**没有 .config**。make 在准备阶段可能会想去"重新生成配置"而报
 #         "Configuration file .config not found"。这里用 include/config/auto.conf 复制一份顶上
@@ -228,6 +254,23 @@ if [ -n "$MISSING_HOST" ]; then
     echo "⚠️⚠️ 缺这些宿主工具，接下来的模块编译一定失败：$MISSING_HOST"
     tail -n 40 "$HOSTLOG" || true
 fi
+
+# 复核编译必需的几个文件还在（syncconfig 失败时会删掉 include/generated/autoconf.h）
+echo "--- 复核编译必需文件 ---"
+MISSING_KEY=""
+for f in include/generated/autoconf.h include/generated/utsrelease.h include/config/auto.conf Module.symvers; do
+    if [ -e "$HROOT/$f" ]; then
+        echo "✅ $f"
+    else
+        echo "❌ 缺 $f"
+        MISSING_KEY="$MISSING_KEY $f"
+    fi
+done
+if [ -n "$MISSING_KEY" ]; then
+    echo "⚠️⚠️ 缺关键文件，模块编译会失败：$MISSING_KEY"
+fi
+# 时间戳再推一次（必须在 .config 之后，避免 make 以为配置过期）
+touch "$HROOT/include/config/auto.conf" "$HROOT/include/generated/autoconf.h" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
 sep "4) 拉 OAF 源码并交叉编译 oaf.ko"
