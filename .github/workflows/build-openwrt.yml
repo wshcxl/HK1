@@ -16,10 +16,19 @@ on:
         description: '封装用的 Flippy 内核系列（需与 rootfs 的 5.15.x 同系列，否则 oaf.ko 可能无法加载）'
         default: '5.15.y'
         required: true
+      rootfs_run_id:
+        description: '【可选】复用某次已编译好的 rootfs，只重跑封装步骤（填 run id，留空=完整编译）'
+        default: ''
+        required: false
+
+permissions:
+  contents: read
+  actions: read
 
 jobs:
   # ── 第一步：编译 ImmortalWrt armsr/armv8 rootfs（含 OAF + Docker + 常用包）──
   build-rootfs:
+    if: ${{ github.event.inputs.rootfs_run_id == '' }}
     runs-on: ubuntu-22.04
     timeout-minutes: 360
     steps:
@@ -103,17 +112,48 @@ jobs:
   # ── 第二步：用 ophub 封装成 HK1 Box 启动镜像 ──
   package:
     needs: build-rootfs
-    runs-on: ubuntu-22.04
+    if: ${{ always() && (needs.build-rootfs.result == 'success' || needs.build-rootfs.result == 'skipped') }}
+    # ⚠️ 必须用 ubuntu-24.04：ophub 的 remake 脚本里用了 cp --update=none，
+    #    该选项要求 coreutils >= 9.3；ubuntu-22.04 只有 8.32，会直接报
+    #    "cp: option '--update' doesn't allow an argument" 并中断封装。
+    #    ophub 官方 CI 打包 OpenWrt 用的就是 ubuntu-24.04。
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: 下载 rootfs 产物
+      - name: 下载 rootfs 产物（本次编译）
+        if: ${{ github.event.inputs.rootfs_run_id == '' }}
         uses: actions/download-artifact@v4
         with:
           name: immortalwrt-rootfs
           path: artifact
+
+      - name: 下载 rootfs 产物（复用历史运行）
+        if: ${{ github.event.inputs.rootfs_run_id != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          RID="${{ github.event.inputs.rootfs_run_id }}"
+          mkdir -p artifact
+          echo "复用 run $RID 的 rootfs 产物"
+          gh run download "$RID" -n immortalwrt-rootfs -D artifact --repo "${{ github.repository }}"
+          ls -lh artifact
+
+      - name: 兼容补丁：ophub 脚本中的 cp --update=none
+        run: |
+          echo "本机 coreutils: $(cp --version | head -n1)"
+          AP="$(dirname "$GITHUB_WORKSPACE")/_actions/ophub/amlogic-s9xxx-openwrt/main"
+          if [ -f "$AP/remake" ]; then
+            echo "找到 $AP/remake，含 --update=none 行数: $(grep -c -- '--update=none' "$AP/remake" || true)"
+            sed -i 's/--update=none/-n/g' "$AP/remake" \
+              && echo "已把 --update=none 降级为等价的 -n（老 coreutils 也能跑）" \
+              || echo "补丁未应用（不影响，24.04 自带 coreutils 9.4）"
+          else
+            echo "未找到 $AP/remake，跳过补丁（24.04 自带 coreutils 9.4，本身就能跑）"
+          fi
 
       - name: 用 ophub 封装成 HK1 Box 启动镜像
         id: package
