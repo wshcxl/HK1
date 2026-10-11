@@ -104,12 +104,21 @@ echo "★ 内核名（kernel_name）: $KNAME"
 
 # ---------------------------------------------------------------------------
 sep "2) 解开模块树，读取目标 vermagic"
-mkdir -p "$W/modroot"
-tar -xzf "$MODTAR" -C "$W/modroot"
-KDIR="$W/modroot/$KNAME"
-[ -d "$KDIR" ] || { echo "❌ 模块目录结构异常："; ls -l "$W/modroot" | head; exit 1; }
+# ⚠️ 两个布局细节（都踩过）：
+#   a) depmod -b <basedir> 认的是 <basedir>/lib/modules/<ver>/，所以必须解到 lib/modules 下面，
+#      否则 depmod 直接报 "could not find module directory"；
+#   b) oaf.ko 不能放模块目录顶层 —— ophub remake 第 976 行会执行
+#        (cd .../lib/modules/${kernel_name}/ && rm -f build source *.ko && find ./ -type f -name '*.ko' -exec ln -s {} ./ \;)
+#      顶层 *.ko 会被 rm 掉。所以要放进子目录（标准的外部模块位置 extra/），
+#      它还会顺手给我们做一个顶层 oaf.ko 符号链接。
+MROOT="$W/modroot/lib/modules"
+mkdir -p "$MROOT"
+tar -xzf "$MODTAR" -C "$MROOT"
+KDIR="$MROOT/$KNAME"
+[ -d "$KDIR" ] || { echo "❌ 模块目录结构异常："; ls -l "$MROOT" | head; exit 1; }
 NKO="$(find "$KDIR" -name '*.ko' | wc -l)"
 echo "模块目录：$KDIR（$NKO 个 .ko）"
+echo "顶层 .ko 数量（这些在封装时会被删）：$(find "$KDIR" -maxdepth 1 -name '*.ko' | wc -l)"
 SAMPLE="$(find "$KDIR" -name '*.ko' | head -n1)"
 MODINFO="$(command -v modinfo || echo modinfo)"
 TARGET_VM="$($MODINFO -F vermagic "$SAMPLE" 2>/dev/null || true)"
@@ -234,11 +243,13 @@ fi
 
 # ---------------------------------------------------------------------------
 sep "6) 注入 oaf.ko + depmod 重建索引"
-cp -f "$BUILT" "$KDIR/oaf.ko"
-chmod 0644 "$KDIR/oaf.ko"
+# 放进 extra/ 子目录（不能直接甩在顶层，会被 remake 的 rm -f *.ko 删掉，见 section 2 注释）
+mkdir -p "$KDIR/extra"
+cp -f "$BUILT" "$KDIR/extra/oaf.ko"
+chmod 0644 "$KDIR/extra/oaf.ko"
 echo "--- oaf.ko 信息 ---"
-$MODINFO "$KDIR/oaf.ko" | head -n 12 || true
-echo "--- 运行 depmod -b <模块树> -a $KNAME ---"
+$MODINFO "$KDIR/extra/oaf.ko" | head -n 12 || true
+echo "--- 运行 depmod -b $W/modroot -a $KNAME ---"
 depmod -b "$W/modroot" -a "$KNAME"
 if grep -q 'oaf\.ko' "$KDIR/modules.dep"; then
     echo "✅ modules.dep 已包含 oaf："
@@ -248,11 +259,16 @@ else
     ls -l "$KDIR"/modules.* 2>/dev/null | head
     exit 1
 fi
+# 复核物理文件确实在（且不在顶层）
+echo "--- 复核 oaf.ko 物理位置 ---"
+find "$KDIR" -name 'oaf.ko' -ls
 
 # ---------------------------------------------------------------------------
 sep "7) 重新打包 modules + 刷新 sha256sums"
-( cd "$W/modroot" && tar -czf "$KB/modules-$KNAME.tar.gz" "$KNAME" )
+( cd "$MROOT" && tar -czf "$KB/modules-$KNAME.tar.gz" "$KNAME" )
 ls -lh "$KB/modules-$KNAME.tar.gz"
+echo "--- 包内确认有 extra/oaf.ko ---"
+tar -tzf "$KB/modules-$KNAME.tar.gz" | grep 'oaf\.ko' || { echo "❌ 打好的包里面没有 oaf.ko"; exit 1; }
 if [ -f "$KB/sha256sums" ]; then
     ( cd "$KB" && sha256sum ./*.tar.gz > sha256sums )
     echo "--- 刷新后的 sha256sums ---"
@@ -278,19 +294,24 @@ if [ -f "$INIT_SRC" ]; then
 import sys
 src, dst = sys.argv[1], sys.argv[2]
 s = open(src, encoding='utf-8').read()
+# 兜底：modprobe 失败时直接 insmod。顶层是 ophub 做的符号链接，extra/ 是真实路径，两个都试。
+INSMOD = ('for m in /lib/modules/$(uname -r)/oaf.ko '
+          '/lib/modules/$(uname -r)/extra/oaf.ko; do\n'
+          '\t\t\t[ -f "$m" ] && insmod "$m" && break\n'
+          '\t\tdone')
 old = '\tlsmod |grep "oaf" >/dev/null\n\tif [ $? -ne 0 ];then\n\t\tmodprobe oaf\n\tfi'
 new = ('\tlsmod |grep "oaf" >/dev/null\n'
        '\tif [ $? -ne 0 ];then\n'
        '\t\tmodprobe nf_conntrack 2>/dev/null\n'
        '\t\tmodprobe oaf 2>/dev/null\n'
-       '\t\tlsmod |grep "oaf" >/dev/null || insmod /lib/modules/$(uname -r)/oaf.ko\n'
+       '\t\tlsmod |grep "oaf" >/dev/null || ' + INSMOD + '\n'
        '\tfi')
 if old in s:
     s = s.replace(old, new, 1)
     print('✅ 已给 appfilter.init 的 modprobe 加 insmod 兜底')
 else:
     s = s.replace('modprobe oaf',
-                  'modprobe oaf 2>/dev/null\n\t\tlsmod |grep "oaf" >/dev/null || insmod /lib/modules/$(uname -r)/oaf.ko',
+                  'modprobe oaf 2>/dev/null\n\t\tlsmod |grep "oaf" >/dev/null || ' + INSMOD,
                   1)
     print('⚠️ 没匹配到原始片段，已在 modprobe oaf 后追加兜底')
 open(dst, 'w', encoding='utf-8').write(s)
