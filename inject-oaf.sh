@@ -262,19 +262,72 @@ cat "$HROOT/include/config/kernel.release" 2>/dev/null || echo "（缺 include/c
 #    它直接就调 scripts/basic/fixdep 了（生成 .*.cmd 依赖用）。
 #    ophub 包里那个是别的机器编的（Exec format error），我们删掉后必须自己先编好，
 #    否则报 `scripts/basic/fixdep: not found`（Error 127）。
-echo "--- 预构建宿主工具（fixdep / modpost，源码都在包里）---"
+echo "--- 预构建宿主工具（fixdep + modpost）---"
 HOSTLOG="$W/hosttools.log"
 # 命令行变量再兜一层：确保这些无关工具不会被拉起（BTF 我们也不需要，顺便省时间）
 SKIP_TOOLS=(CONFIG_SECURITY_SELINUX= CONFIG_BUILDTIME_TABLE_SORT= CONFIG_GCC_PLUGINS= CONFIG_DEBUG_INFO_BTF=)
-echo "### try 1: make scripts_basic scripts"
+# 给顶层 Makefile 追加一个自定义目标：**只编 scripts/mod（modpost）**
+# 为什么不用现成的目标：
+#   - `make scripts` 不含 scripts/mod，编不出 modpost；
+#   - `make modules_prepare` → prepare → prepare0 → archprepare，而 header 包里没有
+#     arch/arm64/tools/，直接 "No rule to make target 'arch/arm64/tools/Makefile'" 挂掉。
+python3 - "$HROOT" <<'PYEOF'
+import os
+import sys
+root = sys.argv[1]
+p = os.path.join(root, 'Makefile')
+s = open(p, encoding='utf-8', errors='replace').read()
+if 'inject_oaf_hosttools' in s:
+    print('自定义目标已存在，跳过')
+else:
+    s += ('\n# ==== 追加（inject-oaf.sh）：只构建 scripts/mod（modpost），\n'
+          '# 绕开 archprepare / prepare0 里那些 header 包没有的部分 ====\n'
+          'PHONY += inject_oaf_hosttools\n'
+          'inject_oaf_hosttools:\n'
+          '\t$(Q)$(MAKE) $(build)=scripts/mod\n')
+    open(p, 'w', encoding='utf-8', newline='\n').write(s)
+    print('已向顶层 Makefile 追加目标 inject_oaf_hosttools')
+PYEOF
+
+echo "### 步骤 A: make scripts_basic（出 fixdep）"
 make -C "$HROOT" ARCH=arm64 CROSS_COMPILE="$CROSS" -j"$(nproc)" "${SKIP_TOOLS[@]}" \
-     scripts_basic scripts >"$HOSTLOG" 2>&1 \
-    || { echo "⚠️ make 返回非 0，输出如下："; tail -n 30 "$HOSTLOG" || true; }
+     scripts_basic >"$HOSTLOG" 2>&1 \
+    || { echo "⚠️ make scripts_basic 返回非 0："; tail -n 30 "$HOSTLOG" || true; }
+
+echo "### 步骤 B: make inject_oaf_hosttools（出 modpost）"
+make -C "$HROOT" ARCH=arm64 CROSS_COMPILE="$CROSS" -j"$(nproc)" "${SKIP_TOOLS[@]}" \
+     inject_oaf_hosttools >>"$HOSTLOG" 2>&1 \
+    || { echo "⚠️ make inject_oaf_hosttools 返回非 0："; tail -n 40 "$HOSTLOG" || true; }
+
 if [ ! -x "$HROOT/scripts/basic/fixdep" ] || [ ! -x "$HROOT/scripts/mod/modpost" ]; then
-    echo "### try 2: make modules_prepare"
+    # 兜底：把 prepare0 对 archprepare 的依赖去掉，并去掉 $(build)=. 那一步，再试一次
+    echo "### 兜底: 给 prepare0 打补丁后 make prepare0"
+    python3 - "$HROOT" <<'PYEOF'
+import os
+import sys
+root = sys.argv[1]
+p = os.path.join(root, 'Makefile')
+lines = open(p, encoding='utf-8', errors='replace').read().split('\n')
+n = 0
+seen = False
+out = []
+for l in lines:
+    if l.strip() == 'prepare0: archprepare':
+        out.append('prepare0:')
+        seen = True
+        n += 1
+        continue
+    if seen and l == '\t$(Q)$(MAKE) $(build)=.':
+        out.append('# [inject-oaf] ' + l)
+        n += 1
+        continue
+    out.append(l)
+open(p, 'w', encoding='utf-8', newline='\n').write('\n'.join(out))
+print('prepare0 补丁：改了 %d 行' % n)
+PYEOF
     make -C "$HROOT" ARCH=arm64 CROSS_COMPILE="$CROSS" -j"$(nproc)" "${SKIP_TOOLS[@]}" \
-         modules_prepare >"$HOSTLOG" 2>&1 \
-        || { echo "⚠️ make 返回非 0，输出如下："; tail -n 30 "$HOSTLOG" || true; }
+         prepare0 >>"$HOSTLOG" 2>&1 \
+        || { echo "⚠️ make prepare0 返回非 0："; tail -n 40 "$HOSTLOG" || true; }
 fi
 MISSING_HOST=""
 for f in scripts/basic/fixdep scripts/mod/modpost; do
