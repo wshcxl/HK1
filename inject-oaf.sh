@@ -61,10 +61,10 @@ resolve_act() {
     for c in "/home/runner/work/_actions" "$(dirname "$WS")/_actions" \
              "$(dirname "$(dirname "$WS")")/_actions" "$HOME/work/_actions"; do
         if [ ! -d "$c" ]; then continue; fi
-        found="$(find "$c" -maxdepth 4 -type d -name 'amlogic-s9xxx-openwrt' 2>/dev/null | head -n1)"
+        found="$(find "$c" -maxdepth 4 -type d -name 'amlogic-s9xxx-openwrt' 2>/dev/null | head -n1 || true)"
         if [ -n "$found" ] && [ -d "$found/make-openwrt" ]; then echo "$found"; return 0; fi
     done
-    found="$(find / -maxdepth 6 -type d -name 'amlogic-s9xxx-openwrt' 2>/dev/null | head -n1)"
+    found="$(find / -maxdepth 6 -type d -name 'amlogic-s9xxx-openwrt' 2>/dev/null | head -n1 || true)"
     if [ -n "$found" ]; then echo "$found"; return 0; fi
     return 1
 }
@@ -96,7 +96,7 @@ tar -xzf "$W/kernel.tar.gz" -C "$W/kb"
 echo "--- 包内结构 ---"
 find "$W/kb" -maxdepth 3 -type f -printf '%10s  %p\n' | sort -k2
 
-MODTAR="$(find "$W/kb" -maxdepth 3 -name 'modules-*.tar.gz' | head -n1)"
+MODTAR="$(find "$W/kb" -maxdepth 3 -name 'modules-*.tar.gz' | head -n1 || true)"
 [ -n "$MODTAR" ] || { echo "❌ 内核包里找不到 modules-*.tar.gz"; exit 1; }
 KB="$(dirname "$MODTAR")"
 KNAME="$(basename "$MODTAR" .tar.gz)"; KNAME="${KNAME#modules-}"
@@ -115,11 +115,11 @@ MROOT="$W/modroot/lib/modules"
 mkdir -p "$MROOT"
 tar -xzf "$MODTAR" -C "$MROOT"
 KDIR="$MROOT/$KNAME"
-[ -d "$KDIR" ] || { echo "❌ 模块目录结构异常："; ls -l "$MROOT" | head; exit 1; }
+[ -d "$KDIR" ] || { echo "❌ 模块目录结构异常："; ls -l "$MROOT" | head || true; exit 1; }
 NKO="$(find "$KDIR" -name '*.ko' | wc -l)"
 echo "模块目录：$KDIR（$NKO 个 .ko）"
 echo "顶层 .ko 数量（这些在封装时会被删）：$(find "$KDIR" -maxdepth 1 -name '*.ko' | wc -l)"
-SAMPLE="$(find "$KDIR" -name '*.ko' | head -n1)"
+SAMPLE="$(find "$KDIR" -name '*.ko' | head -n1 || true)"
 MODINFO="$(command -v modinfo || echo modinfo)"
 TARGET_VM="$($MODINFO -F vermagic "$SAMPLE" 2>/dev/null || true)"
 echo "样本模块：$SAMPLE"
@@ -149,16 +149,16 @@ else
     ls -lh "$W/deb.tar.gz"
     mkdir -p "$W/db"
     tar -xzf "$W/deb.tar.gz" -C "$W/db"
-    HDEB="$(find "$W/db" -name 'linux-headers-*.deb' | head -n1)"
-    [ -n "$HDEB" ] || { echo "❌ deb 包里找不到 linux-headers"; find "$W/db" -maxdepth 2 | head -30; exit 1; }
+    HDEB="$(find "$W/db" -name 'linux-headers-*.deb' | head -n1 || true)"
+    [ -n "$HDEB" ] || { echo "❌ deb 包里找不到 linux-headers"; find "$W/db" -maxdepth 2 | head -30 || true; exit 1; }
     echo "使用 headers deb：$HDEB"
     mkdir -p "$W/hdr"
     dpkg-deb -x "$HDEB" "$W/hdr"
-    HROOT="$(find "$W/hdr/usr/src" -maxdepth 1 -type d -name 'linux-headers-*' | head -n1)"
+    HROOT="$(find "$W/hdr/usr/src" -maxdepth 1 -type d -name 'linux-headers-*' | head -n1 || true)"
 fi
-[ -n "$HROOT" ] && [ -f "$HROOT/Makefile" ] || { echo "❌ 内核构建树不可用：$HROOT"; ls -l "$HROOT" 2>/dev/null | head -30; exit 1; }
+[ -n "$HROOT" ] && [ -f "$HROOT/Makefile" ] || { echo "❌ 内核构建树不可用：$HROOT"; ls -l "$HROOT" 2>/dev/null | head -30 || true; exit 1; }
 echo "★ 内核构建树：$HROOT"
-ls -l "$HROOT" | head -n 30
+ls -l "$HROOT" | head -n 30 || true
 # 保险：ophub 的 header 包里没有内核顶层 Kconfig，若 make 认为 auto.conf 过期会去重新生成配置而报错。
 # 把生成的配置/头文件时间戳推新，避免触发配置再生（不碰 .config，否则反而会触发）。
 touch "$HROOT/include/config/auto.conf" "$HROOT/include/generated/autoconf.h" 2>/dev/null || true
@@ -173,7 +173,7 @@ cat "$HROOT/include/config/kernel.release" 2>/dev/null || echo "（缺 include/c
 sep "4) 拉 OAF 源码并交叉编译 oaf.ko"
 git clone --depth 1 -b "$OAF_BRANCH" "$OAF_REPO" "$W/Open-App"
 SRC="$W/Open-App/oaf/src"
-[ -f "$SRC/Makefile" ] || { echo "❌ OAF 源码结构异常"; find "$W/Open-App" -maxdepth 3 | head -40; exit 1; }
+[ -f "$SRC/Makefile" ] || { echo "❌ OAF 源码结构异常"; find "$W/Open-App" -maxdepth 3 | head -40 || true; exit 1; }
 echo "--- OAF 模块源码 ---"
 ls -l "$SRC"
 
@@ -197,13 +197,13 @@ if [ "$COMPILE_OK" != "1" ]; then
     echo "⚠️⚠️⚠️ 对着 ophub 内核直接编译 oaf.ko 失败（源码与 flippy 内核可能不兼容）"
     echo "⚠️ 退回兜底方案：用 rootfs 里 ImmortalWrt 自己编好的 oaf.ko，改写 vermagic 后注入。"
     echo "⚠️ 注意：这条路的成功率取决于 ophub 内核是否开了 CONFIG_MODVERSIONS（开了会因符号校验失败）。"
-    RK="$(ls "$WS"/artifact/*rootfs.tar.gz 2>/dev/null | head -n1)"
+    RK="$(ls "$WS"/artifact/*rootfs.tar.gz 2>/dev/null | head -n1 || true)"
     echo "rootfs 产物：$RK"
     [ -n "$RK" ] || { echo "❌ 找不到 rootfs（artifact/*rootfs.tar.gz），无法兜底"; exit 1; }
     mkdir -p "$W/immoaf"
     tar -xzf "$RK" --wildcards -C "$W/immoaf" './lib/modules/*/oaf.ko' 2>/dev/null || \
         tar -xzf "$RK" --wildcards -C "$W/immoaf" 'lib/modules/*/oaf.ko' 2>/dev/null || true
-    FOUND="$(find "$W/immoaf" -name 'oaf.ko' | head -n1)"
+    FOUND="$(find "$W/immoaf" -name 'oaf.ko' | head -n1 || true)"
     [ -n "$FOUND" ] || { echo "❌ rootfs 里没找到 oaf.ko（说明 rootfs 编译阶段就没编出来）"; exit 1; }
     cp -f "$FOUND" "$BUILT"
     echo "已取用：$FOUND"
@@ -250,13 +250,13 @@ chmod 0644 "$KDIR/extra/oaf.ko"
 echo "--- oaf.ko 信息 ---"
 $MODINFO "$KDIR/extra/oaf.ko" | head -n 12 || true
 echo "--- 运行 depmod -b $W/modroot -a $KNAME ---"
-depmod -b "$W/modroot" -a "$KNAME"
+depmod -b "$W/modroot" -a "$KNAME" 2>&1 | tail -n 30 || true
 if grep -q 'oaf\.ko' "$KDIR/modules.dep"; then
     echo "✅ modules.dep 已包含 oaf："
     grep 'oaf\.ko' "$KDIR/modules.dep"
 else
     echo "❌ modules.dep 里没有 oaf 条目，加载会失败"
-    ls -l "$KDIR"/modules.* 2>/dev/null | head
+    ls -l "$KDIR"/modules.* 2>/dev/null | head || true
     exit 1
 fi
 # 复核物理文件确实在（且不在顶层）
@@ -318,7 +318,7 @@ open(dst, 'w', encoding='utf-8').write(s)
 PYEOF
     chmod 0755 "$KOUT/etc/init.d/appfilter"
     echo "--- 生成结果中的 oaf 相关行 ---"
-    grep -n 'oaf' "$KOUT/etc/init.d/appfilter" | head -n 20
+    grep -n 'oaf' "$KOUT/etc/init.d/appfilter" | head -n 20 || true
 else
     echo "⚠️ 找不到 appfilter.init（$INIT_SRC），跳过"
 fi
