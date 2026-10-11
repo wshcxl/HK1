@@ -204,7 +204,7 @@ jobs:
           auto_kernel: 'false'
           # 注入的自定义 rootfs 文件（appfilter 启动脚本加 insmod 兜底）
           openwrt_files: oaf-files
-          openwrt_ip: 192.168.50.101
+          openwrt_ip: 192.168.1.96
           openwrt_size: 2048
 
       - name: 上传最终固件
