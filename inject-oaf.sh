@@ -219,6 +219,37 @@ while IFS= read -r f; do
 done < <(find "$HROOT/scripts" -type f -perm -u+x 2>/dev/null)
 echo "共清理 $REMOVED 个跨架构宿主工具"
 
+# ---------------------------------------------------------------------------
+# ⚠️ 关键一步 1.5：把 scripts/ 里"我们不需要、但 header 包缺源码"的宿主工具摘掉
+#    header 包只含 include/ + scripts/ + arch 头文件，没有 security/、tools/ 目录，所以：
+#      scripts/selinux/*  → fatal error: classmap.h: No such file or directory
+#      scripts/sorttable  → fatal error: tools/be_byteshift.h: No such file or directory
+#    这两个一失败，`make scripts` 整个中断，**必需的** scripts/mod/modpost 也就编不出来
+#    （modpost 负责生成 .mod.c：vermagic / __this_module 都在里面，没它 oaf.ko 根本链接不出来）。
+#    办法：注释掉 scripts/Makefile 里对应的 subdir-/hostprogs- 行，命令行变量再兜一层。
+echo "--- 摘掉不需要的宿主工具（selinux / sorttable / gcc-plugins）---"
+python3 - "$HROOT" <<'PYEOF'
+import os
+import sys
+root = sys.argv[1]
+p = os.path.join(root, 'scripts/Makefile')
+if not os.path.exists(p):
+    print('⚠️ 没找到 scripts/Makefile')
+    sys.exit(0)
+lines = open(p, encoding='utf-8', errors='replace').read().split('\n')
+KEYS = ('sorttable', 'selinux', 'gcc-plugins')
+out = []
+n = 0
+for l in lines:
+    if l[:1] != '\t' and any(k in l for k in KEYS) and ('+=' in l or 'subdir' in l or 'hostprogs' in l):
+        out.append('# [inject-oaf] ' + l)
+        n += 1
+    else:
+        out.append(l)
+open(p, 'w', encoding='utf-8', newline='\n').write('\n'.join(out))
+print('scripts/Makefile：已注释 %d 行' % n)
+PYEOF
+
 echo "--- 内核配置（从 include/config/auto.conf 读，包里没有 .config）---"
 grep -E '^(CONFIG_MODVERSIONS|CONFIG_MODULE_SIG|CONFIG_MODULE_SIG_FORCE|CONFIG_MODULE_UNLOAD|CONFIG_SMP|CONFIG_PREEMPT|CONFIG_PREEMPT_NONE|CONFIG_LOCALVERSION=|CONFIG_DEBUG_INFO_BTF|CONFIG_MODULE_COMPRESS|CONFIG_MODULE_FORCE_LOAD)' "$HROOT/include/config/auto.conf" 2>/dev/null || echo "（无匹配项）"
 echo "--- kernel.release ---"
@@ -233,12 +264,16 @@ cat "$HROOT/include/config/kernel.release" 2>/dev/null || echo "（缺 include/c
 #    否则报 `scripts/basic/fixdep: not found`（Error 127）。
 echo "--- 预构建宿主工具（fixdep / modpost，源码都在包里）---"
 HOSTLOG="$W/hosttools.log"
+# 命令行变量再兜一层：确保这些无关工具不会被拉起（BTF 我们也不需要，顺便省时间）
+SKIP_TOOLS=(CONFIG_SECURITY_SELINUX= CONFIG_BUILDTIME_TABLE_SORT= CONFIG_GCC_PLUGINS= CONFIG_DEBUG_INFO_BTF=)
 echo "### try 1: make scripts_basic scripts"
-make -C "$HROOT" ARCH=arm64 CROSS_COMPILE="$CROSS" -j"$(nproc)" scripts_basic scripts >"$HOSTLOG" 2>&1 \
+make -C "$HROOT" ARCH=arm64 CROSS_COMPILE="$CROSS" -j"$(nproc)" "${SKIP_TOOLS[@]}" \
+     scripts_basic scripts >"$HOSTLOG" 2>&1 \
     || { echo "⚠️ make 返回非 0，输出如下："; tail -n 30 "$HOSTLOG" || true; }
 if [ ! -x "$HROOT/scripts/basic/fixdep" ] || [ ! -x "$HROOT/scripts/mod/modpost" ]; then
     echo "### try 2: make modules_prepare"
-    make -C "$HROOT" ARCH=arm64 CROSS_COMPILE="$CROSS" -j"$(nproc)" modules_prepare >"$HOSTLOG" 2>&1 \
+    make -C "$HROOT" ARCH=arm64 CROSS_COMPILE="$CROSS" -j"$(nproc)" "${SKIP_TOOLS[@]}" \
+         modules_prepare >"$HOSTLOG" 2>&1 \
         || { echo "⚠️ make 返回非 0，输出如下："; tail -n 30 "$HOSTLOG" || true; }
 fi
 MISSING_HOST=""
