@@ -145,14 +145,16 @@ jobs:
       - name: 兼容补丁：ophub 脚本中的 cp --update=none
         run: |
           echo "本机 coreutils: $(cp --version | head -n1)"
-          AP="$(dirname "$GITHUB_WORKSPACE")/_actions/ophub/amlogic-s9xxx-openwrt/main"
-          if [ -f "$AP/remake" ]; then
+          # composite action 被 GitHub 解到 /home/runner/work/_actions/<owner>/<repo>/<ref>
+          AP="$(find /home/runner/work -maxdepth 4 -type d -name 'amlogic-s9xxx-openwrt' 2>/dev/null | head -n1)"
+          if [ -n "$AP" ] && [ -f "$AP/remake" ]; then
             echo "找到 $AP/remake，含 --update=none 行数: $(grep -c -- '--update=none' "$AP/remake" || true)"
             sed -i 's/--update=none/-n/g' "$AP/remake" \
               && echo "已把 --update=none 降级为等价的 -n（老 coreutils 也能跑）" \
               || echo "补丁未应用（不影响，24.04 自带 coreutils 9.4）"
           else
-            echo "未找到 $AP/remake，跳过补丁（24.04 自带 coreutils 9.4，本身就能跑）"
+            echo "未找到 ophub action 目录（AP=[$AP]），跳过补丁（24.04 自带 coreutils 9.4，本身就能跑）"
+            ls -la /home/runner/work/_actions 2>/dev/null || true
           fi
 
       # ⚠️ 核心：ophub 封装会 rm -rf rootfs/lib/modules/* 再换成它自己的内核模块，
@@ -172,6 +174,17 @@ jobs:
           KTAG: stable
         run: |
           chmod +x inject-oaf.sh
+          # openwrt_files 输入要求这个目录必须先存在，否则 ophub 里 cp 会报 cannot stat
+          mkdir -p oaf-files
+          # composite action 被 GitHub 解到 /home/runner/work/_actions/<owner>/<repo>/<ref>
+          ACT_DIR="$(find /home/runner/work -maxdepth 4 -type d -name 'amlogic-s9xxx-openwrt' 2>/dev/null | head -n1)"
+          if [ -n "$ACT_DIR" ]; then
+            export ACT_DIR
+            echo "★ ophub action 目录：$ACT_DIR"
+          else
+            echo "⚠️ 没找到 ophub action 目录，交给 inject-oaf.sh 自己找"
+            ls -la /home/runner/work/_actions 2>/dev/null || true
+          fi
           ./inject-oaf.sh
           echo "OAF_INJECT=ok" >> "$GITHUB_ENV"
 
@@ -207,29 +220,67 @@ jobs:
           ls -lh ${{ env.PACKAGED_OUTPUTPATH }}
 
       - name: 验证镜像里确实有 oaf.ko
-        if: always()
+        # 这一步是"较真"用的：镜像里没有 oaf.ko 就直接把这次运行判红，
+        # 免得打包成功但其实 OAF 是死的（上一版就踩了这个坑：只 glob *.img，实际产物是 .img.gz）
         run: |
           set +e
-          IMG="$(ls ${{ env.PACKAGED_OUTPUTPATH }}/*.img 2>/dev/null | head -n1)"
-          echo "镜像: $IMG"
-          [ -n "$IMG" ] || { echo "没找到镜像，跳过验证"; exit 0; }
+          OUT="${{ env.PACKAGED_OUTPUTPATH }}"
+          echo "产物目录: $OUT"
+          ls -lh "$OUT" || true
+          IMG="$(ls "$OUT"/*.img 2>/dev/null | head -n1)"
+          if [ -z "$IMG" ]; then
+            GZ="$(ls "$OUT"/*.img.gz 2>/dev/null | head -n1)"
+            if [ -n "$GZ" ]; then
+              echo "镜像是压缩包，先解出来：$GZ"
+              IMG=/tmp/hk1-verify.img
+              gunzip -c "$GZ" > "$IMG"
+            fi
+          fi
+          echo "镜像: [$IMG]"
+          if [ -z "$IMG" ] || [ ! -s "$IMG" ]; then
+            echo "::error title=验证失败::产物目录里既没有 .img 也没有 .img.gz"
+            exit 1
+          fi
+          ls -lh "$IMG"
+
+          echo "=== 粗筛：镜像里 oaf.ko 这个文件名出现次数 ==="
+          GREPN="$(grep -a -o 'oaf\.ko' "$IMG" | wc -l)"
+          echo "出现 $GREPN 次"
+
+          FOUND=0
+          MOUNTED=0
           sudo modprobe btrfs 2>/dev/null
           LOOP="$(sudo losetup -Pf --show "$IMG")"
           echo "loop 设备: $LOOP"
           sudo partx -s "$LOOP" 2>/dev/null
           sudo mkdir -p /mnt/hk1root
-          if sudo mount -o ro "${LOOP}p2" /mnt/hk1root; then
-            echo "=== /lib/modules ==="
-            ls /mnt/hk1root/lib/modules/ || true
-            echo "=== 查找 oaf.ko ==="
-            sudo find /mnt/hk1root/lib/modules -name 'oaf.ko*' -ls || true
-            echo "=== modules.dep 里的 oaf ==="
-            sudo grep -h 'oaf' /mnt/hk1root/lib/modules/*/modules.dep || echo "⚠️ modules.dep 里没有 oaf"
-            echo "=== /etc/init.d/appfilter 里的加载逻辑 ==="
-            sudo grep -n 'oaf' /mnt/hk1root/etc/init.d/appfilter 2>/dev/null | head -n 20
-            sudo umount /mnt/hk1root
-          else
-            echo "⚠️ 挂载 p2 失败（可能是 btrfs 支持问题），无法验证"
-          fi
+          for P in "${LOOP}p2" "${LOOP}p1"; do
+            if sudo mount -o ro "$P" /mnt/hk1root 2>/dev/null; then
+              MOUNTED=1
+              echo "已挂载 $P"
+              echo "=== /lib/modules ==="
+              ls /mnt/hk1root/lib/modules/ || true
+              echo "=== find -name 'oaf.ko*' ==="
+              sudo find /mnt/hk1root/lib/modules -name 'oaf.ko*' -ls || true
+              if sudo find /mnt/hk1root/lib/modules -name 'oaf.ko*' 2>/dev/null | grep -q .; then FOUND=1; fi
+              echo "=== modules.dep 里的 oaf ==="
+              sudo grep -h 'oaf' /mnt/hk1root/lib/modules/*/modules.dep || echo "⚠️ modules.dep 里没有 oaf"
+              echo "=== /etc/init.d/appfilter ==="
+              sudo ls -l /mnt/hk1root/etc/init.d/appfilter 2>/dev/null || echo "⚠️ 没有 /etc/init.d/appfilter"
+              sudo grep -n 'oaf' /mnt/hk1root/etc/init.d/appfilter 2>/dev/null | head -n 20
+              sudo umount /mnt/hk1root
+              break
+            fi
+          done
           sudo losetup -d "$LOOP" 2>/dev/null
-          exit 0
+
+          if [ "$FOUND" = "1" ]; then
+            echo "✅ 验证通过：镜像里确实有 oaf.ko"
+            exit 0
+          fi
+          if [ "$MOUNTED" = "0" ] && [ "$GREPN" -gt 0 ]; then
+            echo "::warning title=无法挂载镜像::runner 挂不上 btrfs，不能逐文件确认；但镜像里出现了 oaf.ko 文件名（$GREPN 次），判定为已注入"
+            exit 0
+          fi
+          echo "::error title=验证失败::镜像里找不到 oaf.ko —— 刷上去 OAF 不会有应用识别/家长控制"
+          exit 1
