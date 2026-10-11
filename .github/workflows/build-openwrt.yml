@@ -54,17 +54,31 @@ jobs:
       - name: 更新软件源 feeds
         run: cd openwrt && ./scripts/feeds update -a
 
+      # ⚠️ 关键修复 2（前置）：禁用 IMM 自带 open-app-filter，必须在 feeds install 之前做
+      #   IMM packages 源的 net/open-app-filter 也提供 appfilter / kmod-oaf，与 wshcxl/Open-App 同名。
+      #   若等 feeds install 之后再删 symlink，安装阶段会因"同名包被后者遮蔽"导致 Open-App 的
+      #   appfilter 没被装进去 -> 最后 opkg 报 "cannot find dependency appfilter for luci-app-oaf"。
+      #   做法：install 之前把 IMM 那个 Makefile 清空（目录保留，防止 feeds install 因缺目录报错），
+      #   这样只有 Open-App 的 OAF 全套（kmod-oaf / appfilter / luci-app-oaf）生效。
+      - name: 禁用 IMM 自带 open-app-filter（install 之前）
+        run: |
+          cd openwrt
+          OAFP=feeds/packages/net/open-app-filter/Makefile
+          if [ -f "$OAFP" ]; then
+            mv "$OAFP" "${OAFP}.bak"
+            printf '# disabled: 与 wshcxl/Open-App 的 OAF 重名冲突，已禁用 IMM 自带版本\n' > "$OAFP"
+            echo "已禁用 IMM 自带 open-app-filter（避免遮蔽 Open-App 的 appfilter）"
+          else
+            echo "未找到 IMM open-app-filter，跳过"
+          fi
+
       - name: 安装软件源 feeds
         run: cd openwrt && ./scripts/feeds install -a
 
-      # ⚠️ 关键修复 2：消除 OAF 重复符号冲突 + 修复 kmod 编译
-      #   1) IMM 自带 packages feed 里的 net/open-app-filter 也会生成 kmod-oaf / appfilter，
-      #      与 wshcxl/Open-App 的同名包重名 -> kconfig 递归依赖 -> kmod-oaf 被丢弃 ->
-      #      打包阶段 "cannot find dependency kmod-oaf"。统一只用 Open-App 的 OAF 全套。
-      #   2) Open-App 的 oaf(kmod) Makefile 缺少 Build/Prepare 把 src/* 拷到 PKG_BUILD_DIR，
-      #      导致 M=$(PKG_BUILD_DIR) 找不到 Kbuild，内核模块编不出来。这里补上。
-      #   逻辑放在 fix-oaf.sh 里，避免 YAML 多行 heredoc 的缩进被吞。
-      - name: 修复 OAF 冲突与 kmod 编译
+      # ⚠️ 关键修复 3：Open-App 的 oaf(kmod) Makefile 缺少 Build/Prepare 把 src/* 拷到
+      #   PKG_BUILD_DIR，导致 M=$(PKG_BUILD_DIR) 找不到 Kbuild，内核模块编不出来。这里补上。
+      #   （上轮 kmod-oaf 已成功装上，说明此补丁有效；保留以防重装。）
+      - name: 修复 OAF kmod 编译（Build/Prepare 补丁）
         run: |
           chmod +x fix-oaf.sh
           ./fix-oaf.sh
