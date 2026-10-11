@@ -109,8 +109,8 @@ sep "2) 解开模块树，读取目标 vermagic"
 #      否则 depmod 直接报 "could not find module directory"；
 #   b) oaf.ko 不能放模块目录顶层 —— ophub remake 第 976 行会执行
 #        (cd .../lib/modules/${kernel_name}/ && rm -f build source *.ko && find ./ -type f -name '*.ko' -exec ln -s {} ./ \;)
-#      顶层 *.ko 会被 rm 掉。所以要放进子目录（标准的外部模块位置 extra/），
-#      它还会顺手给我们做一个顶层 oaf.ko 符号链接。
+#      顶层 *.ko 会被 rm 掉；但又不能自己新建顶层目录（remake 第 977 行要求顶层恰好 1 个目录，
+#      见 section 6 的坑 D），所以最终塞进已有的那个顶层目录 kernel/ 里 → kernel/oaf.ko。
 MROOT="$W/modroot/lib/modules"
 mkdir -p "$MROOT"
 tar -xzf "$MODTAR" -C "$MROOT"
@@ -434,12 +434,33 @@ fi
 
 # ---------------------------------------------------------------------------
 sep "6) 注入 oaf.ko + depmod 重建索引"
-# 放进 extra/ 子目录（不能直接甩在顶层，会被 remake 的 rm -f *.ko 删掉，见 section 2 注释）
-mkdir -p "$KDIR/extra"
-cp -f "$BUILT" "$KDIR/extra/oaf.ko"
-chmod 0644 "$KDIR/extra/oaf.ko"
+# ⚠️ 位置约束（坑 D，2026-10-11 踩到才明白）：
+#   ophub remake 第 977 行有一条硬检查：
+#     [[ "$(ls ${tag_rootfs}/lib/modules/${kernel_name} -l | grep "^d" | wc -l)" -eq "1" ]]
+#   也就是 **模块目录的顶层必须恰好只有 1 个子目录**（ophub 自己的包就是 kernel/ 这一个，
+#   2089 个 .ko 全在 kernel/ 下面）。
+#   我原先新建了个 extra/ 塞 oaf.ko，顶层就变成 2 个目录 → 封装直接报
+#     [💔] /usr/lib/modules kernel folder is missing.
+#   所以正确做法：塞进 **已有的那个顶层目录里面**（即 kernel/oaf.ko），顶层目录数不变；
+#   remake 第 976 行的 find 照样会给它做顶层 oaf.ko 符号链接。
+echo "--- 模块目录顶层子目录（ophub 要求恰好 1 个）---"
+ls -l "$KDIR" | grep '^d' || true
+TOPDIR="$(find "$KDIR" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort | head -n1 || true)"
+TDCOUNT="$(find "$KDIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)"
+echo "顶层子目录数：$TDCOUNT（取用：${TOPDIR:-无}）"
+if [ "$TDCOUNT" -eq 1 ] && [ -n "$TOPDIR" ]; then
+    INST="$KDIR/$TOPDIR"
+else
+    echo "⚠️ 顶层子目录数不是 1，退回新建 extra/（封装那步可能仍会失败）"
+    INST="$KDIR/extra"
+    mkdir -p "$INST"
+fi
+cp -f "$BUILT" "$INST/oaf.ko"
+chmod 0644 "$INST/oaf.ko"
+REL="${INST#"$KDIR"/}/oaf.ko"
+echo "★ oaf.ko 在模块目录里的相对路径：$REL"
 echo "--- oaf.ko 信息 ---"
-$MODINFO "$KDIR/extra/oaf.ko" | head -n 12 || true
+$MODINFO "$INST/oaf.ko" | head -n 12 || true
 echo "--- 运行 depmod -b $W/modroot -a $KNAME ---"
 depmod -b "$W/modroot" -a "$KNAME" 2>&1 | tail -n 30 || true
 if grep -q 'oaf\.ko' "$KDIR/modules.dep"; then
@@ -453,13 +474,24 @@ fi
 # 复核物理文件确实在（且不在顶层）
 echo "--- 复核 oaf.ko 物理位置 ---"
 find "$KDIR" -name 'oaf.ko' -ls
+echo "--- 注入后顶层子目录数（必须还是 1）---"
+find "$KDIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l
 
 # ---------------------------------------------------------------------------
 sep "7) 重新打包 modules + 刷新 sha256sums"
 ( cd "$MROOT" && tar -czf "$KB/modules-$KNAME.tar.gz" "$KNAME" )
 ls -lh "$KB/modules-$KNAME.tar.gz"
-echo "--- 包内确认有 extra/oaf.ko ---"
+echo "--- 包内确认有 $REL ---"
 tar -tzf "$KB/modules-$KNAME.tar.gz" | grep 'oaf\.ko' || { echo "❌ 打好的包里面没有 oaf.ko"; exit 1; }
+# 硬校验 1：包内顶层（$KNAME/ 下面）必须只有 1 个目录 —— 就是 ophub remake 第 977 行那条检查，
+#          不满足就地判死，比等 ophub 跑到 (3/6) 再报错省时间。
+TARDIRS="$(tar -tvzf "$KB/modules-$KNAME.tar.gz" | awk '$1 ~ /^d/ {n=$NF; sub(/\/$/,"",n); if (split(n,a,"/")==2) print a[2]}' | sort -u | tr '\n' ' ' || true)"
+echo "包内顶层目录：[${TARDIRS}]"
+TDN="$(echo "${TARDIRS}" | wc -w)"
+[ "$TDN" -eq 1 ] || { echo "❌ 重打包后顶层有 $TDN 个目录，ophub 的 kernel folder 检查（要求恰好 1 个）会失败"; exit 1; }
+echo "✅ 顶层目录数 = 1，符合 ophub 检查"
+# 硬校验 2：oaf.ko 必须真的被压进包里（不是软链、不是空壳）
+tar -tvzf "$KB/modules-$KNAME.tar.gz" | grep "$REL" || { echo "❌ 包内 $REL 不完整"; exit 1; }
 if [ -f "$KB/sha256sums" ]; then
     ( cd "$KB" && sha256sum ./*.tar.gz > sha256sums )
     echo "--- 刷新后的 sha256sums ---"
@@ -485,8 +517,9 @@ if [ -f "$INIT_SRC" ]; then
 import sys
 src, dst = sys.argv[1], sys.argv[2]
 s = open(src, encoding='utf-8').read()
-# 兜底：modprobe 失败时直接 insmod。顶层是 ophub 做的符号链接，extra/ 是真实路径，两个都试。
+# 兜底：modprobe 失败时直接 insmod。顶层是 ophub 做的符号链接，kernel/ 是真实路径，extra/ 是旧版兼容。
 INSMOD = ('for m in /lib/modules/$(uname -r)/oaf.ko '
+          '/lib/modules/$(uname -r)/kernel/oaf.ko '
           '/lib/modules/$(uname -r)/extra/oaf.ko; do\n'
           '\t\t\t[ -f "$m" ] && insmod "$m" && break\n'
           '\t\tdone')
