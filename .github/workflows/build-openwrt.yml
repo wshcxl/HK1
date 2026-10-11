@@ -6,7 +6,7 @@ on:
       zh_default:
         description: '默认 LuCI 语言设为中文(zh_cn)。false=英文默认，true=中文默认（两种都内置中文语言包，可随时切换）'
         type: boolean
-        default: false
+        default: true
         required: true
       immortalwrt_branch:
         description: 'ImmortalWrt 源码分支'
