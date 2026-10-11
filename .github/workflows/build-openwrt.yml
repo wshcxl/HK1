@@ -245,10 +245,13 @@ jobs:
 
           echo "=== 粗筛：镜像里 oaf.ko 这个文件名出现次数 ==="
           # 注意：opkg 的包列表文件里也会出现 oaf.ko（路径指向 IMM 自己的内核版本），
-          #      所以"oaf.ko 出现次数"只能当参考；真正说明注入成功的是 extra/oaf.ko 这个路径。
+          #      所以"oaf.ko 出现次数"只能当参考；
+          #      真正说明注入成功的标记是 appfilter 启动脚本里那句 insmod 兜底
+          #      （含有 kernel/oaf.ko 或 extra/oaf.ko 这样的真实路径），
+          #      因为 modules-*.tar.gz 是压缩包，grep -a 扫不到里面的文件名。
           GREPN="$(grep -a -o 'oaf\.ko' "$IMG" | wc -l)"
-          EXTRA="$(grep -a -o 'extra/oaf\.ko' "$IMG" | wc -l)"
-          echo "oaf.ko 出现 $GREPN 次；其中 extra/oaf.ko 出现 $EXTRA 次"
+          REAL="$(($(grep -a -o 'kernel/oaf\.ko' "$IMG" | wc -l) + $(grep -a -o 'extra/oaf\.ko' "$IMG" | wc -l)))"
+          echo "oaf.ko 出现 $GREPN 次；其中真实路径标记（kernel/oaf.ko 或 extra/oaf.ko）出现 $REAL 次"
 
           FOUND=0
           MOUNTED=0
@@ -271,7 +274,7 @@ jobs:
               echo "=== /etc/init.d/appfilter ==="
               sudo ls -l /mnt/hk1root/etc/init.d/appfilter 2>/dev/null || echo "⚠️ 没有 /etc/init.d/appfilter"
               sudo grep -n 'oaf' /mnt/hk1root/etc/init.d/appfilter 2>/dev/null | head -n 20 || true
-              if sudo grep -q 'extra/oaf\.ko' /mnt/hk1root/etc/init.d/appfilter 2>/dev/null; then
+              if sudo grep -qE '(kernel|extra)/oaf\.ko' /mnt/hk1root/etc/init.d/appfilter 2>/dev/null; then
                 echo "✅ appfilter 启动脚本已带 insmod 兜底（openwrt_files 注入生效）"
               else
                 echo "::warning title=openwrt_files 可能没生效::/etc/init.d/appfilter 还是原版，modprobe 失败时没有 insmod 兜底"
@@ -286,8 +289,8 @@ jobs:
             echo "✅ 验证通过：镜像里确实有 oaf.ko"
             exit 0
           fi
-          if [ "$MOUNTED" = "0" ] && [ "$EXTRA" -gt 0 ]; then
-            echo "::warning title=无法挂载镜像::runner 挂不上 btrfs，不能逐文件确认；但镜像里出现了 extra/oaf.ko 路径（$EXTRA 次），判定为已注入"
+          if [ "$MOUNTED" = "0" ] && [ "$REAL" -gt 0 ]; then
+            echo "::warning title=无法挂载镜像::runner 挂不上 btrfs，不能逐文件确认；但镜像里出现了 kernel/oaf.ko 路径标记（$REAL 次），判定为已注入"
             exit 0
           fi
           echo "::error title=验证失败::镜像里找不到 oaf.ko —— 刷上去 OAF 不会有应用识别/家长控制"
