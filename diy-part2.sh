@@ -10,8 +10,10 @@
 # Description: OpenWrt DIY script part 2 (After Update feeds)
 #
 
-# Modify default IP
-sed -i 's/192.168.1.1/192.168.50.101/g' package/base-files/files/bin/config_generate
+# 修改默认 IP
+# 注意：刷完首次开机就用这个 IP，不用再改。选192.168.1.96 是因为用户家路由器在 192.168.1.1
+# （.95 打印机 / .99 电视盒子 / .110 录像机 / .156 电脑，.96 是空位），这样盒子可以直接当旁路由用。
+sed -i 's/192.168.1.1/192.168.1.96/g' package/base-files/files/bin/config_generate
 
 # 默认 LuCI 语言设为中文（zh_cn）—— 仅当 ZH_DEFAULT=1 时启用
 # 两种构建都会内置 luci-i18n-base-zh-cn，可随时在 Web 界面切换语言
