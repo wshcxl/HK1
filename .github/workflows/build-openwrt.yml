@@ -13,8 +13,8 @@ on:
         default: 'openwrt-23.05'
         required: true
       kernel:
-        description: '封装用的 Flippy 内核系列（需与 rootfs 的 5.15.x 同系列，否则 oaf.ko 可能无法加载）'
-        default: '5.15.y'
+        description: '【锁定】ophub 内核具体版本（要和 oaf.ko 编译对齐，不要随便改）'
+        default: '5.15.222'
         required: true
       rootfs_run_id:
         description: '【可选】复用某次已编译好的 rootfs，只重跑封装步骤（填 run id，留空=完整编译）'
@@ -155,13 +155,42 @@ jobs:
             echo "未找到 $AP/remake，跳过补丁（24.04 自带 coreutils 9.4，本身就能跑）"
           fi
 
+      # ⚠️ 核心：ophub 封装会 rm -rf rootfs/lib/modules/* 再换成它自己的内核模块，
+      #    我们编的 oaf.ko 会被丢掉，OAF 就等于废了。所以这里先"对着 ophub 内核重新编一份
+      #    oaf.ko 并注入到它的内核模块包里"，详见 inject-oaf.sh 里的说明。
+      - name: 安装交叉编译依赖（给 oaf.ko 用）
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu make bc bison flex libelf-dev \
+            libssl-dev kmod dwarves zstd dpkg-dev
+
+      - name: 为 ophub 内核重编 oaf.ko 并注入内核模块包
+        id: inject
+        continue-on-error: true
+        env:
+          KVER: ${{ github.event.inputs.kernel || '5.15.222' }}
+          KTAG: stable
+        run: |
+          chmod +x inject-oaf.sh
+          ./inject-oaf.sh
+          echo "OAF_INJECT=ok" >> "$GITHUB_ENV"
+
+      - name: 注入失败提示
+        if: ${{ steps.inject.outcome == 'failure' }}
+        run: |
+          echo "::error title=oaf.ko 注入失败::本次镜像不会包含 oaf.ko，OAF 应用识别/家长控制将无法工作。请看上一步日志。"
+
       - name: 用 ophub 封装成 HK1 Box 启动镜像
         id: package
         uses: ophub/amlogic-s9xxx-openwrt@main
         with:
           openwrt_path: artifact/*.tar.gz
           openwrt_board: s905x3-hk1
-          openwrt_kernel: ${{ github.event.inputs.kernel || '5.15.y' }}
+          openwrt_kernel: ${{ github.event.inputs.kernel || '5.15.222' }}
+          # 锁死版本，避免 ophub 更新 latest 5.15.x 导致我们编的 oaf.ko vermagic 不匹配
+          auto_kernel: 'false'
+          # 注入的自定义 rootfs 文件（appfilter 启动脚本加 insmod 兜底）
+          openwrt_files: oaf-files
           openwrt_ip: 192.168.50.101
           openwrt_size: 2048
 
@@ -176,3 +205,31 @@ jobs:
         run: |
           echo "固件产物目录: ${{ env.PACKAGED_OUTPUTPATH }}"
           ls -lh ${{ env.PACKAGED_OUTPUTPATH }}
+
+      - name: 验证镜像里确实有 oaf.ko
+        if: always()
+        run: |
+          set +e
+          IMG="$(ls ${{ env.PACKAGED_OUTPUTPATH }}/*.img 2>/dev/null | head -n1)"
+          echo "镜像: $IMG"
+          [ -n "$IMG" ] || { echo "没找到镜像，跳过验证"; exit 0; }
+          sudo modprobe btrfs 2>/dev/null
+          LOOP="$(sudo losetup -Pf --show "$IMG")"
+          echo "loop 设备: $LOOP"
+          sudo partx -s "$LOOP" 2>/dev/null
+          sudo mkdir -p /mnt/hk1root
+          if sudo mount -o ro "${LOOP}p2" /mnt/hk1root; then
+            echo "=== /lib/modules ==="
+            ls /mnt/hk1root/lib/modules/ || true
+            echo "=== 查找 oaf.ko ==="
+            sudo find /mnt/hk1root/lib/modules -name 'oaf.ko*' -ls || true
+            echo "=== modules.dep 里的 oaf ==="
+            sudo grep -h 'oaf' /mnt/hk1root/lib/modules/*/modules.dep || echo "⚠️ modules.dep 里没有 oaf"
+            echo "=== /etc/init.d/appfilter 里的加载逻辑 ==="
+            sudo grep -n 'oaf' /mnt/hk1root/etc/init.d/appfilter 2>/dev/null | head -n 20
+            sudo umount /mnt/hk1root
+          else
+            echo "⚠️ 挂载 p2 失败（可能是 btrfs 支持问题），无法验证"
+          fi
+          sudo losetup -d "$LOOP" 2>/dev/null
+          exit 0
