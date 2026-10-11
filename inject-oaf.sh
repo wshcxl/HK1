@@ -43,13 +43,15 @@ sep "0) 环境检查 / 定位 ophub action 目录"
 ACT="${ACT_DIR:-$(dirname "$WS")/_actions/ophub/amlogic-s9xxx-openwrt/main}"
 if [ ! -d "$ACT/make-openwrt" ]; then
     ACT="$(find "$(dirname "$WS")/_actions" -maxdepth 4 -type d -name 'amlogic-s9xxx-openwrt' 2>/dev/null | head -n1)"
-    [ -n "$ACT" ] && ACT="$ACT/main"
+    if [ -n "$ACT" ]; then
+        ACT="$ACT/main"
+    fi
 fi
-[ -n "${ACT:-}" ] && [ -d "$ACT/make-openwrt" ] || {
-    echo "❌ 找不到 ophub action 目录（找过 $ACT）"
+if [ -z "${ACT:-}" ] || [ ! -d "$ACT/make-openwrt" ]; then
+    echo "❌ 找不到 ophub action 目录（尝试过：$ACT）"
     ls -la "$(dirname "$WS")/_actions" 2>/dev/null || true
     exit 1
-}
+fi
 rm -rf "$W" "$KOUT"
 mkdir -p "$W" "$KOUT"
 echo "内核版本：$KVER (kernel_$KTAG)"
@@ -123,6 +125,10 @@ fi
 [ -n "$HROOT" ] && [ -f "$HROOT/Makefile" ] || { echo "❌ 内核构建树不可用：$HROOT"; ls -l "$HROOT" 2>/dev/null | head -30; exit 1; }
 echo "★ 内核构建树：$HROOT"
 ls -l "$HROOT" | head -n 30
+# 保险：ophub 的 header 包里没有内核顶层 Kconfig，若 make 认为 auto.conf 过期会去重新生成配置而报错。
+# 把生成的配置/头文件时间戳推新，避免触发配置再生（不碰 .config，否则反而会触发）。
+touch "$HROOT/include/config/auto.conf" "$HROOT/include/generated/autoconf.h" 2>/dev/null || true
+touch "$HROOT/include/config/auto.conf.cmd" 2>/dev/null || true
 echo "--- .config 关键项 ---"
 grep -E '^(CONFIG_MODVERSIONS|CONFIG_MODULE_SIG|CONFIG_MODULE_SIG_FORCE|CONFIG_MODULE_UNLOAD|CONFIG_SMP|CONFIG_PREEMPT|CONFIG_PREEMPT_NONE|CONFIG_LOCALVERSION=|CONFIG_DEBUG_INFO_BTF|CONFIG_MODULE_COMPRESS)' "$HROOT/.config" || echo "（无匹配项）"
 echo "--- kernel.release ---"
@@ -142,14 +148,34 @@ KCFLAGS="-Wno-error -Wno-error=missing-prototypes -Wno-error=missing-declaration
 -Wno-error=parentheses -Wno-error=format -Wno-frame-larger-than"
 
 echo "--- 开始编译（失败会把最后 150 行日志打出来）---"
-if ! make -C "$HROOT" M="$SRC" ARCH=arm64 CROSS_COMPILE="$CROSS" \
-        KCFLAGS="$KCFLAGS" WERROR=0 modules -j"$(nproc)" 2>&1 | tail -n 150; then
-    echo "❌ oaf.ko 编译失败"
-    exit 1
-fi
 BUILT="$SRC/oaf.ko"
-[ -f "$BUILT" ] || { echo "❌ 编译结束但没有 oaf.ko"; ls -l "$SRC"; exit 1; }
-echo "★ 编出：$BUILT"
+rm -f "$BUILT"
+COMPILE_OK=0
+if make -C "$HROOT" M="$SRC" ARCH=arm64 CROSS_COMPILE="$CROSS" \
+        KCFLAGS="$KCFLAGS" WERROR=0 modules -j"$(nproc)" 2>&1 | tail -n 150; then
+    if [ -f "$BUILT" ]; then
+        COMPILE_OK=1
+    fi
+fi
+
+if [ "$COMPILE_OK" != "1" ]; then
+    echo
+    echo "⚠️⚠️⚠️ 对着 ophub 内核直接编译 oaf.ko 失败（源码与 flippy 内核可能不兼容）"
+    echo "⚠️ 退回兜底方案：用 rootfs 里 ImmortalWrt 自己编好的 oaf.ko，改写 vermagic 后注入。"
+    echo "⚠️ 注意：这条路的成功率取决于 ophub 内核是否开了 CONFIG_MODVERSIONS（开了会因符号校验失败）。"
+    RK="$(ls "$WS"/artifact/*rootfs.tar.gz 2>/dev/null | head -n1)"
+    echo "rootfs 产物：$RK"
+    [ -n "$RK" ] || { echo "❌ 找不到 rootfs（artifact/*rootfs.tar.gz），无法兜底"; exit 1; }
+    mkdir -p "$W/immoaf"
+    tar -xzf "$RK" --wildcards -C "$W/immoaf" './lib/modules/*/oaf.ko' 2>/dev/null || \
+        tar -xzf "$RK" --wildcards -C "$W/immoaf" 'lib/modules/*/oaf.ko' 2>/dev/null || true
+    FOUND="$(find "$W/immoaf" -name 'oaf.ko' | head -n1)"
+    [ -n "$FOUND" ] || { echo "❌ rootfs 里没找到 oaf.ko（说明 rootfs 编译阶段就没编出来）"; exit 1; }
+    cp -f "$FOUND" "$BUILT"
+    echo "已取用：$FOUND"
+fi
+[ -f "$BUILT" ] || { echo "❌ 最终没有可用的 oaf.ko"; ls -l "$SRC"; exit 1; }
+echo "★ 使用：$BUILT"
 file "$BUILT" || true
 
 # ---------------------------------------------------------------------------
