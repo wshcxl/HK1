@@ -8,7 +8,7 @@
 - **WiFi**：brcm4339 SDIO 无线网卡用户态（`wpad-mbedtls`）
 - 常用工具：curl、nano、htop、bash、fdisk、e2fsprogs、iperf3、tcpdump、samba4、ttyd、upnp
 
-默认管理地址：**192.168.50.101**（无密码，首次登录请立刻设置）
+默认管理地址：**192.168.1.96**（无密码，首次登录请立刻设置；IP 烤在固件里，刷完直接用，不用再改）
 
 ---
 
@@ -101,7 +101,11 @@ ophub 的 `remake` 里有这么一条硬检查（就在解完模块包、做完�
 1. 下载 Artifacts 里的 `.img.gz`（Etcher 能直接吃 `.gz`，不用手动解压；想手动解就用 7-Zip）；
 2. 用 [balenaEtcher](https://etcher.balena.io/) 或 Rufus 写 **SD 卡 / U 盘**（HK1 Box 优先从 SD 启动；要写 eMMC 得拆机短接或用盒子里的现有系统）；
 3. 插卡上电，首次启动约 1~3 分钟（会自动扩容 rootfs）；
-4. 网线接盒子网口，浏览器打开 **http://192.168.50.101**。
+4. 网线接盒子网口，浏览器打开 **http://192.168.1.96**。
+
+> 盒子当**旁路由**用（推荐，省事）：网线把盒子接到主路由/交换机，然后家里的设备把网关/DNS 指向
+> `192.168.1.96`，全家流量就会经过盒子，OAF 才能认应用、限速、看记录；
+> 只想先看后台的话不用改网关，但 OAF 会是空的。
 
 > 每次封装结束，CI 都会把镜像 `gunzip` 出来挂载一遍、逐文件确认
 > `/lib/modules/5.15.222-ophub/kernel/oaf.ko`、顶层软链 `oaf.ko -> ./kernel/oaf.ko`、
