@@ -159,10 +159,18 @@ fi
 [ -n "$HROOT" ] && [ -f "$HROOT/Makefile" ] || { echo "❌ 内核构建树不可用：$HROOT"; ls -l "$HROOT" 2>/dev/null | head -30 || true; exit 1; }
 echo "★ 内核构建树：$HROOT"
 ls -l "$HROOT" | head -n 30 || true
-# 保险：ophub 的 header 包里没有内核顶层 Kconfig，若 make 认为 auto.conf 过期会去重新生成配置而报错。
-# 把生成的配置/头文件时间戳推新，避免触发配置再生（不碰 .config，否则反而会触发）。
+# 保险 1：ophub 的 header 包用 `tar -czf header-*.tar.gz *` 打的，通配符不含点开头的文件，
+#         所以包里**没有 .config**。make 在准备阶段可能会想去"重新生成配置"而报
+#         "Configuration file .config not found"。这里用 include/config/auto.conf 复制一份顶上
+#         （auto.conf 的内容就是 CONFIG_x=y/m，格式上等价于精简版 .config）。
+if [ ! -f "$HROOT/.config" ] && [ -f "$HROOT/include/config/auto.conf" ]; then
+    cp -f "$HROOT/include/config/auto.conf" "$HROOT/.config"
+    echo "（包里没有 .config，已用 include/config/auto.conf 复制一份顶上）"
+fi
+# 保险 2：把生成物的时间戳推新，避免 make 认为配置过期而去重新生成（那需要 .config/Kconfig 链）
 touch "$HROOT/include/config/auto.conf" "$HROOT/include/generated/autoconf.h" 2>/dev/null || true
 touch "$HROOT/include/config/auto.conf.cmd" 2>/dev/null || true
+touch "$HROOT/include/config/kernel.release" "$HROOT/include/generated/utsrelease.h" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
 # ⚠️ 关键一步：header 包里带着 ophub 构建机上编好的"宿主工具"
@@ -190,6 +198,36 @@ grep -E '^(CONFIG_MODVERSIONS|CONFIG_MODULE_SIG|CONFIG_MODULE_SIG_FORCE|CONFIG_M
 echo "--- kernel.release ---"
 cat "$HROOT/include/config/kernel.release" 2>/dev/null || echo "（缺 include/config/kernel.release）"
 [ -f "$HROOT/Module.symvers" ] && echo "Module.symvers: $(wc -l < "$HROOT/Module.symvers") 行" || echo "⚠️ 没有 Module.symvers"
+
+# ---------------------------------------------------------------------------
+# ⚠️ 关键一步 2：显式预构建宿主工具
+#    实测 `make -C <header树> M=<模块> modules` **不会**先跑 scripts_basic，
+#    它直接就调 scripts/basic/fixdep 了（生成 .*.cmd 依赖用）。
+#    ophub 包里那个是别的机器编的（Exec format error），我们删掉后必须自己先编好，
+#    否则报 `scripts/basic/fixdep: not found`（Error 127）。
+echo "--- 预构建宿主工具（fixdep / modpost，源码都在包里）---"
+HOSTLOG="$W/hosttools.log"
+echo "### try 1: make scripts_basic scripts"
+make -C "$HROOT" ARCH=arm64 CROSS_COMPILE="$CROSS" -j"$(nproc)" scripts_basic scripts >"$HOSTLOG" 2>&1 \
+    || { echo "⚠️ make 返回非 0，输出如下："; tail -n 30 "$HOSTLOG" || true; }
+if [ ! -x "$HROOT/scripts/basic/fixdep" ] || [ ! -x "$HROOT/scripts/mod/modpost" ]; then
+    echo "### try 2: make modules_prepare"
+    make -C "$HROOT" ARCH=arm64 CROSS_COMPILE="$CROSS" -j"$(nproc)" modules_prepare >"$HOSTLOG" 2>&1 \
+        || { echo "⚠️ make 返回非 0，输出如下："; tail -n 30 "$HOSTLOG" || true; }
+fi
+MISSING_HOST=""
+for f in scripts/basic/fixdep scripts/mod/modpost; do
+    if [ -x "$HROOT/$f" ]; then
+        echo "✅ 宿主工具就绪：$f"
+    else
+        echo "❌ 宿主工具缺失：$f"
+        MISSING_HOST="$MISSING_HOST $f"
+    fi
+done
+if [ -n "$MISSING_HOST" ]; then
+    echo "⚠️⚠️ 缺这些宿主工具，接下来的模块编译一定失败：$MISSING_HOST"
+    tail -n 40 "$HOSTLOG" || true
+fi
 
 # ---------------------------------------------------------------------------
 sep "4) 拉 OAF 源码并交叉编译 oaf.ko"
