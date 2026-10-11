@@ -9,12 +9,12 @@ on:
         default: true
         required: true
       immortalwrt_branch:
-        description: 'ImmortalWrt 源码分支'
-        default: 'openwrt-24.10'
+        description: 'ImmortalWrt 源码分支（23.05 = 内核 5.15，对 OAF 内核模块适配最好）'
+        default: 'openwrt-23.05'
         required: true
       kernel:
-        description: '封装用的 Flippy 内核系列（需与 rootfs 的 6.6.x 对应，否则 OAF 内核模块可能无法加载）'
-        default: '6.6.y'
+        description: '封装用的 Flippy 内核系列（需与 rootfs 的 5.15.x 同系列，否则 oaf.ko 可能无法加载）'
+        default: '5.15.y'
         required: true
 
 jobs:
@@ -41,7 +41,7 @@ jobs:
 
       - name: 克隆 ImmortalWrt 源码
         run: |
-          git clone --depth 1 -b "${{ github.event.inputs.immortalwrt_branch || 'openwrt-24.10' }}" https://github.com/immortalwrt/immortalwrt.git openwrt
+          git clone --depth 1 -b "${{ github.event.inputs.immortalwrt_branch || 'openwrt-23.05' }}" https://github.com/immortalwrt/immortalwrt.git openwrt
 
       - name: DIY part1 —— 加入 OAF(OpenAppFilter) 特征库 feed
         run: |
@@ -56,6 +56,18 @@ jobs:
 
       - name: 安装软件源 feeds
         run: cd openwrt && ./scripts/feeds install -a
+
+      # ⚠️ 关键修复 2：消除 OAF 重复符号冲突 + 修复 kmod 编译
+      #   1) IMM 自带 packages feed 里的 net/open-app-filter 也会生成 kmod-oaf / appfilter，
+      #      与 wshcxl/Open-App 的同名包重名 -> kconfig 递归依赖 -> kmod-oaf 被丢弃 ->
+      #      打包阶段 "cannot find dependency kmod-oaf"。统一只用 Open-App 的 OAF 全套。
+      #   2) Open-App 的 oaf(kmod) Makefile 缺少 Build/Prepare 把 src/* 拷到 PKG_BUILD_DIR，
+      #      导致 M=$(PKG_BUILD_DIR) 找不到 Kbuild，内核模块编不出来。这里补上。
+      #   逻辑放在 fix-oaf.sh 里，避免 YAML 多行 heredoc 的缩进被吞。
+      - name: 修复 OAF 冲突与 kmod 编译
+        run: |
+          chmod +x fix-oaf.sh
+          ./fix-oaf.sh
 
       - name: 写入 .config 并展开（含 IP / 语言定制）
         env:
@@ -110,7 +122,7 @@ jobs:
         with:
           openwrt_path: artifact/*.tar.gz
           openwrt_board: s905x3-hk1
-          openwrt_kernel: ${{ github.event.inputs.kernel || '6.6.y' }}
+          openwrt_kernel: ${{ github.event.inputs.kernel || '5.15.y' }}
           openwrt_ip: 192.168.50.101
           openwrt_size: 2048
 
