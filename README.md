@@ -38,7 +38,7 @@ ImmortalWrt / OpenWrt 官方**没有 amlogic 目标**，不能直接编出盒子
 
 ---
 
-## 三、⚠️ 三个必须知道的坑（都已在本仓库里修好）
+## 三、⚠️ 四个必须知道的坑（都已在本仓库里修好）
 
 ### 坑 1：`appfilter` 同名包被遮蔽
 IMM 自带的 `net/open-app-filter` 和 `wshcxl/Open-App` 的 `open-app-filter` **都定义名为 `appfilter` 的包**。
@@ -60,7 +60,7 @@ ophub 的 `remake` 流程是：
 1. 下载 ophub 对应版本的内核包（内含编译该内核时的 **header 树**：`.config` / `Module.symvers` / `include/generated`）；
 2. 用这棵 header 树**对着 ophub 内核交叉编译 `oaf.ko`**（vermagic 天然一致）；
 3. 校验 vermagic，不一致就原地改写 `.modinfo` 里的字符串并复核；
-4. 把 `oaf.ko` 注入模块树 → `depmod` 重建 `modules.dep` → 重新打包 `modules-*.tar.gz` 并刷新 `sha256sums`；
+4. 把 `oaf.ko` 注入模块树 → `depmod` 重建 `modules.dep` → 重新打包 `modules-*.tar.gz` 并刷新 `sha256sums`（放哪个目录有讲究，见坑 4）；
 5. 把内核包放到 `<action>/make-openwrt/kernel/<tag>/<version>/`，`remake` 见目录已存在就跳过下载；
 6. 顺手给 `appfilter` 启动脚本加一行兜底：`modprobe oaf` 失败就 `insmod /lib/modules/$(uname -r)/oaf.ko`。
 
@@ -71,14 +71,42 @@ ophub 的 `remake` 用了 `cp -af --update=none`，在 `ubuntu-22.04`（coreutil
 👉 修法：封装 job 用 `ubuntu-24.04`（coreutils 9.4，ophub 官方 CI 也是这个），
 另外脚本里还有一步把 `--update=none` 降级成等价的 `-n` 作兜底。
 
+### 坑 4：模块目录顶层**恰好只能有 1 个子目录**
+ophub 的 `remake` 里有这么一条硬检查（就在解完模块包、做完软链之后）：
+```sh
+[[ "$(ls ${rootfs}/lib/modules/${kernel_name} -l | grep "^d" | wc -l)" -eq "1" ]] || error_msg "/usr/lib/modules kernel folder is missing."
+```
+`ls -l | grep "^d"` 数的是**顶层子目录个数**，要求**正好等于 1**（ophub 自己的包就是 `kernel/` 这一个，
+2089 个 `.ko` 全在 `kernel/` 底下）。所以文档里常见的"外部模块放 `extra/`"那种写法**在 ophub 这里会翻车**：
+多出一个顶层目录 → 封装在 `(3/6) Replacing kernel files` 直接报
+`[💔] /usr/lib/modules kernel folder is missing.`
+
+👉 修法：`oaf.ko` 放进**已有的那个顶层目录**里，也就是 `lib/modules/5.15.222-ophub/kernel/oaf.ko`；
+`remake` 后面那句 `find ./ -type f -name '*.ko' -exec ln -s {} ./ \;` 会照样在顶层给它做好
+`oaf.ko -> ./kernel/oaf.ko` 软链，`modprobe oaf` / `insmod .../oaf.ko` 都能用。
+`inject-oaf.sh` 里现在还会在重打包后**硬校验顶层目录数 = 1**，不满足就当场失败，
+不会白等二十分钟才在 ophub 那步报错。
+
+> 另一个坑中坑：`inject-oaf.sh` 的 header 树是从 ophub 内核包里解出来的，里面有**别的机器编好的宿主工具**
+> （`scripts/basic/fixdep`、`scripts/mod/modpost` 等 13 个 ELF），在别的 runner 上跑会 `Exec format error`(126)
+> 或 `not found`(127)。脚本里会先把这些 ELF 删掉让本机 gcc 重编；同时 header 包**没有 Kconfig 树、也没有 `.config`**，
+> 所以 `syncconfig` 必须跳过、配置从 `include/config/auto.conf` 读。
+
 ---
 
 ## 四、刷机
 
-1. 下载 Artifacts 里的 `.img`；
+产物是 `openwrt_amlogic_s905x3-hk1_k5.15.222_<日期>.img.gz`（约 300 MB，解开 ~2.4 GB；`hk1-upload` 那版会带 WiFi 用户态）。
+
+1. 下载 Artifacts 里的 `.img.gz`（Etcher 能直接吃 `.gz`，不用手动解压；想手动解就用 7-Zip）；
 2. 用 [balenaEtcher](https://etcher.balena.io/) 或 Rufus 写 **SD 卡 / U 盘**（HK1 Box 优先从 SD 启动；要写 eMMC 得拆机短接或用盒子里的现有系统）；
 3. 插卡上电，首次启动约 1~3 分钟（会自动扩容 rootfs）；
 4. 网线接盒子网口，浏览器打开 **http://192.168.50.101**。
+
+> 每次封装结束，CI 都会把镜像 `gunzip` 出来挂载一遍、逐文件确认
+> `/lib/modules/5.15.222-ophub/kernel/oaf.ko`、顶层软链 `oaf.ko -> ./kernel/oaf.ko`、
+> `modules.dep` 里的 oaf 条目、以及 `/etc/init.d/appfilter` 的 insmod 兜底都在，
+> 缺任何一样就直接把这次运行判红，不会出现"打包成功其实 OAF 是死的"。
 
 ---
 
@@ -89,7 +117,8 @@ SSH 登录后：
 ```sh
 # 1. 内核模块在不在、加载没有
 uname -r                       # 应为 5.15.222-ophub
-ls -l /lib/modules/$(uname -r)/oaf.ko
+ls -l /lib/modules/$(uname -r)/oaf.ko            # 顶层软链（ophub 封装时做的）
+ls -l /lib/modules/$(uname -r)/kernel/oaf.ko     # 真实文件
 lsmod | grep oaf
 dmesg | grep -i oaf
 
