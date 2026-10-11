@@ -40,16 +40,41 @@ sep() { echo; echo "==================== $* ===================="; }
 
 # ---------------------------------------------------------------------------
 sep "0) 环境检查 / 定位 ophub action 目录"
-ACT="${ACT_DIR:-$(dirname "$WS")/_actions/ophub/amlogic-s9xxx-openwrt/main}"
-if [ ! -d "$ACT/make-openwrt" ]; then
-    ACT="$(find "$(dirname "$WS")/_actions" -maxdepth 4 -type d -name 'amlogic-s9xxx-openwrt' 2>/dev/null | head -n1)"
-    if [ -n "$ACT" ]; then
-        ACT="$ACT/main"
+# ⚠️ 注意：GitHub 会把 composite action 解到 /home/runner/work/_actions/<owner>/<repo>/<ref>，
+#    这个目录**不在** GITHUB_WORKSPACE 里面（WS=/home/runner/work/HK1/HK1），
+#    所以 $(dirname "$WS")/_actions 是错的（会拼成 /home/runner/work/HK1/_actions）。
+#    这里按候选路径逐个试 + find 兜底。
+resolve_act() {
+    local c found
+    if [ -n "${ACT_DIR:-}" ] && [ -d "$ACT_DIR/make-openwrt" ]; then
+        echo "$ACT_DIR"; return 0
     fi
-fi
+    for c in \
+        "/home/runner/work/_actions/ophub/amlogic-s9xxx-openwrt/main" \
+        "${RUNNER_WORKSPACE:-}/../_actions/ophub/amlogic-s9xxx-openwrt/main" \
+        "$(dirname "$WS")/_actions/ophub/amlogic-s9xxx-openwrt/main" \
+        "$(dirname "$(dirname "$WS")")/_actions/ophub/amlogic-s9xxx-openwrt/main" \
+        "$HOME/work/_actions/ophub/amlogic-s9xxx-openwrt/main"
+    do
+        if [ -d "$c/make-openwrt" ]; then echo "$c"; return 0; fi
+    done
+    for c in "/home/runner/work/_actions" "$(dirname "$WS")/_actions" \
+             "$(dirname "$(dirname "$WS")")/_actions" "$HOME/work/_actions"; do
+        if [ ! -d "$c" ]; then continue; fi
+        found="$(find "$c" -maxdepth 4 -type d -name 'amlogic-s9xxx-openwrt' 2>/dev/null | head -n1)"
+        if [ -n "$found" ] && [ -d "$found/make-openwrt" ]; then echo "$found"; return 0; fi
+    done
+    found="$(find / -maxdepth 6 -type d -name 'amlogic-s9xxx-openwrt' 2>/dev/null | head -n1)"
+    if [ -n "$found" ]; then echo "$found"; return 0; fi
+    return 1
+}
+ACT="$(resolve_act || true)"
 if [ -z "${ACT:-}" ] || [ ! -d "$ACT/make-openwrt" ]; then
-    echo "❌ 找不到 ophub action 目录（尝试过：$ACT）"
-    ls -la "$(dirname "$WS")/_actions" 2>/dev/null || true
+    echo "❌ 找不到 ophub action 目录"
+    echo "--- /home/runner/work/_actions ---"
+    ls -la /home/runner/work/_actions 2>/dev/null || echo "（不存在）"
+    echo "--- $(dirname "$WS")/_actions ---"
+    ls -la "$(dirname "$WS")/_actions" 2>/dev/null || echo "（不存在）"
     exit 1
 fi
 rm -rf "$W" "$KOUT"
