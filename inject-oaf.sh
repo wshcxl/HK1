@@ -119,7 +119,7 @@ KDIR="$MROOT/$KNAME"
 NKO="$(find "$KDIR" -name '*.ko' | wc -l)"
 echo "模块目录：$KDIR（$NKO 个 .ko）"
 echo "顶层 .ko 数量（这些在封装时会被删）：$(find "$KDIR" -maxdepth 1 -name '*.ko' | wc -l)"
-SAMPLE="$(find "$KDIR" -name '*.ko' | head -n1 || true)"
+SAMPLE="$(find "$KDIR" -name '*.ko' -print -quit 2>/dev/null || true)"
 MODINFO="$(command -v modinfo || echo modinfo)"
 TARGET_VM="$($MODINFO -F vermagic "$SAMPLE" 2>/dev/null || true)"
 echo "样本模块：$SAMPLE"
@@ -131,7 +131,7 @@ else
 fi
 echo "--- 关键依赖是否存在 ---"
 for m in nf_conntrack.ko nf_reject_ipv4.ko br_netfilter.ko overlay.ko veth.ko usb-storage.ko; do
-    printf '%-22s %s\n' "$m" "$(find "$KDIR" -name "$m" | head -n1 || true)"
+    printf '%-22s %s\n' "$m" "$(find "$KDIR" -name "$m" -print -quit 2>/dev/null || true)"
 done
 
 # ---------------------------------------------------------------------------
@@ -163,8 +163,30 @@ ls -l "$HROOT" | head -n 30 || true
 # 把生成的配置/头文件时间戳推新，避免触发配置再生（不碰 .config，否则反而会触发）。
 touch "$HROOT/include/config/auto.conf" "$HROOT/include/generated/autoconf.h" 2>/dev/null || true
 touch "$HROOT/include/config/auto.conf.cmd" 2>/dev/null || true
-echo "--- .config 关键项 ---"
-grep -E '^(CONFIG_MODVERSIONS|CONFIG_MODULE_SIG|CONFIG_MODULE_SIG_FORCE|CONFIG_MODULE_UNLOAD|CONFIG_SMP|CONFIG_PREEMPT|CONFIG_PREEMPT_NONE|CONFIG_LOCALVERSION=|CONFIG_DEBUG_INFO_BTF|CONFIG_MODULE_COMPRESS)' "$HROOT/.config" || echo "（无匹配项）"
+
+# ---------------------------------------------------------------------------
+# ⚠️ 关键一步：header 包里带着 ophub 构建机上编好的"宿主工具"
+#    （scripts/basic/fixdep、scripts/mod/modpost 等），它们是**给 ophub 那台机器**编的，
+#    在本 runner 上会报 "scripts/basic/fixdep: Exec format error"（Error 126），
+#    从而整个模块编译失败。修法：把 scripts/ 下的 .o / 隐藏 .cmd / ELF 可执行文件删掉，
+#    让 make 用本机 gcc（HOSTCC）重新编这些工具（源码都在包里）。
+echo "--- 清理跨架构的宿主工具（fixdep/modpost 等），让本机重新编 ---"
+find "$HROOT/scripts" -name '*.o' -delete 2>/dev/null || true
+find "$HROOT/scripts" -name '.*.cmd' -delete 2>/dev/null || true
+REMOVED=0
+while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    magic="$(head -c 4 "$f" 2>/dev/null | od -An -tx1 2>/dev/null | tr -d ' \n')"
+    if [ "$magic" = "7f454c46" ]; then
+        echo "  删除: ${f#$HROOT/}"
+        rm -f "$f" "${f%.*}.o" "$(dirname "$f")/.$(basename "$f").cmd"
+        REMOVED=$((REMOVED+1))
+    fi
+done < <(find "$HROOT/scripts" -type f -perm -u+x 2>/dev/null)
+echo "共清理 $REMOVED 个跨架构宿主工具"
+
+echo "--- 内核配置（从 include/config/auto.conf 读，包里没有 .config）---"
+grep -E '^(CONFIG_MODVERSIONS|CONFIG_MODULE_SIG|CONFIG_MODULE_SIG_FORCE|CONFIG_MODULE_UNLOAD|CONFIG_SMP|CONFIG_PREEMPT|CONFIG_PREEMPT_NONE|CONFIG_LOCALVERSION=|CONFIG_DEBUG_INFO_BTF|CONFIG_MODULE_COMPRESS|CONFIG_MODULE_FORCE_LOAD)' "$HROOT/include/config/auto.conf" 2>/dev/null || echo "（无匹配项）"
 echo "--- kernel.release ---"
 cat "$HROOT/include/config/kernel.release" 2>/dev/null || echo "（缺 include/config/kernel.release）"
 [ -f "$HROOT/Module.symvers" ] && echo "Module.symvers: $(wc -l < "$HROOT/Module.symvers") 行" || echo "⚠️ 没有 Module.symvers"
