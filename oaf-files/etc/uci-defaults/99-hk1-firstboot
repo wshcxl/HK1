@@ -1,27 +1,77 @@
 #!/bin/sh
-# HK1 Box 首次开机默认配置：WiFi 默认开（AP 模式）+ Argon 主题 + ttyd 自启
+# HK1 Box 首次开机默认配置（零手工配置目标：刷完即用）
+#  - Alpha 主题（左侧栏 + 毛玻璃登录页，用户指定）
+#  - 自动以 STA 方式连接家里小米子路由（2.4G；5G 会被小米双频引导拒绝关联）
+#  - wwan 上联接口：静态 IP（小米 DHCP 对新终端偶发不响应，静态最稳）
+#  - 开热点 HK1Box（设备连它即可被 OAF 监测；与 STA 同信道共存）
 # /etc/uci-defaults/ 下的脚本只在刷机后第一次启动时执行一次，之后被系统自动删除。
 
-# 1) WiFi：没有无线配置就自动生成（wifi config 会探测 brcm4339 网卡生成 radio0）
+# 1) 无线配置：没有就自动生成（wifi config 会探测 brcm4339 生成 radio0）
 if [ ! -s /etc/config/wireless ]; then
   /sbin/wifi config >/dev/null 2>&1
 fi
 if uci -q get wireless.radio0 >/dev/null 2>&1; then
-  uci set wireless.radio0.disabled='0'
+  # 锁定 2.4G 信道 1：实测小米子路由 5G(信道40) 直接拒绝关联(status_code=16)，
+  # 2.4G 正常；锁死后 STA 扫描/连接都只在 2.4G，避开 5G 拒绝。
+  uci set wireless.radio0.channel='1'
+  uci set wireless.radio0.htmode='HT20'
   uci set wireless.radio0.country='CN'
+  uci set wireless.radio0.disabled='0'
+  # STA 客户端：连小米子路由（上联互联网 + OAF 监测链路）
+  uci -q delete wireless.wlan_sta
+  uci set wireless.wlan_sta=wifi-iface
+  uci set wireless.wlan_sta.device='radio0'
+  uci set wireless.wlan_sta.mode='sta'
+  uci set wireless.wlan_sta.network='wwan'
+  uci set wireless.wlan_sta.ssid='Xiaomi_子路由'
+  uci set wireless.wlan_sta.encryption='psk2'
+  uci set wireless.wlan_sta.key='xiaochangtongzhitiaoshizimuluyouqi'
+  uci set wireless.wlan_sta.disabled='0'
+  # 热点：默认开启，连上盒子的设备流量过盒子，OAF 才有数据
   uci set wireless.default_radio0.ssid='HK1Box'
   uci set wireless.default_radio0.encryption='psk2'
   uci set wireless.default_radio0.key='12345678'
   uci set wireless.default_radio0.network='lan'
+  uci set wireless.default_radio0.disabled='0'
   uci commit wireless
-  /sbin/wifi up >/dev/null 2>&1
 fi
 
-# 2) 默认主题设为 Argon（v2.4.8，静态路径 /luci-static/argon）
-uci set luci.main.mediaurlbase='/luci-static/argon'
+# 2) 上联接口 wwan：静态 IP（192.168.1.48 是小米 DHCP 此前分配的地址，锁定防漂）
+uci -q delete network.wwan
+uci set network.wwan=interface
+uci set network.wwan.proto='static'
+uci set network.wwan.ipaddr='192.168.1.48'
+uci set network.wwan.netmask='255.255.255.0'
+uci set network.wwan.gateway='192.168.1.1'
+uci add_list network.wwan.dns='223.5.5.5'
+uci add_list network.wwan.dns='119.29.29.29'
+uci set network.wwan.metric='20'
+# lan 不得再挂默认网关（避免双默认路由抢道，实测会把流量引向空网口）
+uci -q delete network.lan.gateway
+uci -q delete network.lan.dns
+uci commit network
+
+# 3) 防火墙：把 wwan 归入 wan 区（复用 masquerade 出站 NAT）
+for Z in $(uci -q show firewall | sed -n 's/^\(firewall\.[^.]*\)=zone$/\1/p'); do
+  if [ "$(uci -q get $Z.name)" = "wan" ]; then
+    uci add_list $Z.network='wwan'
+    break
+  fi
+done
+uci commit firewall
+
+# 4) wpa_supplicant/hostapd 控制目录权限：两者经 ujail 以 network 用户运行，
+#    /var/run 下的 socket 目录需要 network 可写，否则无限重启失败（实测踩坑）
+chmod 0777 /var/run 2>/dev/null
+mkdir -p /var/run/wpa_supplicant /var/run/hostapd 2>/dev/null
+chown root:network /var/run/wpa_supplicant /var/run/hostapd 2>/dev/null
+chmod 0770 /var/run/wpa_supplicant /var/run/hostapd 2>/dev/null
+
+# 5) 默认主题：Alpha（左侧栏）
+uci set luci.main.mediaurlbase='/luci-static/alpha'
 uci commit luci
 
-# 3) ttyd 网页终端确保开机自启（LuCI 菜单：系统 → 终端）
+# 6) ttyd 网页终端确保开机自启（LuCI 菜单：系统 → 终端）
 [ -x /etc/init.d/ttyd ] && /etc/init.d/ttyd enable
 
 exit 0
