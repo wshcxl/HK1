@@ -67,8 +67,8 @@ mkdir -p /var/run/wpa_supplicant /var/run/hostapd 2>/dev/null
 chown root:network /var/run/wpa_supplicant /var/run/hostapd 2>/dev/null
 chmod 0770 /var/run/wpa_supplicant /var/run/hostapd 2>/dev/null
 
-# 5) 默认主题：Alpha（左侧栏）
-uci set luci.main.mediaurlbase='/luci-static/alpha'
+# 5) 默认主题：Argon v2（左侧栏，/luci-static/argon 是 v2.4.8 的静态路径）
+uci set luci.main.mediaurlbase='/luci-static/argon'
 uci commit luci
 
 # 6) ttyd 网页终端确保开机自启（LuCI 菜单：系统 → 终端）
