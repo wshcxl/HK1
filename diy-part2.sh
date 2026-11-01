@@ -28,3 +28,23 @@ if [ "$ZH_DEFAULT" = "1" ]; then
 else
   echo "ZH_DEFAULT 未开启，保持英文默认语言"
 fi
+
+# ===== Argon 主题（烤进固件，刷完即用，不用每次刷机再装）=====
+# 用 v2.4.8-hotfix：LUCI_DEPENDS 只有 wget+jsonfilter，适配 LuCI 23.05。
+# master(v3.x) 依赖 ucode 模板（ucode-mod-math + .ut 文件），23.05 的 luci-base 没有 ucode，不能用。
+echo "diy-part2: 克隆 Argon 主题 v2.4.8-hotfix（适配 23.05）"
+git clone --depth 1 -b release/v2.4.8-hotfix https://github.com/jerrykuku/luci-theme-argon package/hk1/luci-theme-argon
+
+# 配套设置插件（换色/毛玻璃/壁纸），v2.5.0-beta.1 是配 v2 主题的版本；
+# master 已变成 v3 时代的"空壳迁移包"（只是占位，设置已并入 v3 主题本体），不能用。
+echo "diy-part2: 克隆 luci-app-argon-config v2.5.0-beta.1（配 v2 主题）"
+git clone --depth 1 -b v2.5.0-beta.1 https://github.com/jerrykuku/luci-app-argon-config package/hk1/luci-app-argon-config
+
+# 校验克隆结果，失败立刻报错中止（主题缺了编译能过但刷出来没有，属静默失败，必须防）
+for P in package/hk1/luci-theme-argon/Makefile package/hk1/luci-app-argon-config/Makefile; do
+  if [ ! -f "$P" ]; then
+    echo "::error::克隆 Argon 失败：缺 $P"
+    exit 1
+  fi
+done
+echo "diy-part2: Argon 主题三件套克隆完成"
