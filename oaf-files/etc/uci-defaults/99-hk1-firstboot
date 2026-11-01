@@ -1,0 +1,27 @@
+#!/bin/sh
+# HK1 Box 首次开机默认配置：WiFi 默认开（AP 模式）+ Argon 主题 + ttyd 自启
+# /etc/uci-defaults/ 下的脚本只在刷机后第一次启动时执行一次，之后被系统自动删除。
+
+# 1) WiFi：没有无线配置就自动生成（wifi config 会探测 brcm4339 网卡生成 radio0）
+if [ ! -s /etc/config/wireless ]; then
+  /sbin/wifi config >/dev/null 2>&1
+fi
+if uci -q get wireless.radio0 >/dev/null 2>&1; then
+  uci set wireless.radio0.disabled='0'
+  uci set wireless.radio0.country='CN'
+  uci set wireless.default_radio0.ssid='HK1Box'
+  uci set wireless.default_radio0.encryption='psk2'
+  uci set wireless.default_radio0.key='12345678'
+  uci set wireless.default_radio0.network='lan'
+  uci commit wireless
+  /sbin/wifi up >/dev/null 2>&1
+fi
+
+# 2) 默认主题设为 Argon（v2.4.8，静态路径 /luci-static/argon）
+uci set luci.main.mediaurlbase='/luci-static/argon'
+uci commit luci
+
+# 3) ttyd 网页终端确保开机自启（LuCI 菜单：系统 → 终端）
+[ -x /etc/init.d/ttyd ] && /etc/init.d/ttyd enable
+
+exit 0
