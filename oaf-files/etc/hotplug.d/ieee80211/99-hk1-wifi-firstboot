@@ -1,0 +1,18 @@
+#!/bin/sh
+# 兜底：WiFi 网卡枚举晚于首启脚本时的自动补配。
+# ieee80211 hotplug 在 phy 注册时触发（无论早晚）；配好后靠 grep HK1Box 幂等跳过。
+[ "$ACTION" = "add" ] || exit 0
+[ -f /etc/config/wireless ] && grep -q "HK1Box" /etc/config/wireless 2>/dev/null && exit 0
+
+/sbin/wifi config >/dev/null 2>&1
+uci -q get wireless.radio0 >/dev/null 2>&1 || exit 0
+
+uci set wireless.radio0.disabled='0'
+uci set wireless.radio0.country='CN'
+uci set wireless.default_radio0.ssid='HK1Box'
+uci set wireless.default_radio0.encryption='psk2'
+uci set wireless.default_radio0.key='12345678'
+uci set wireless.default_radio0.network='lan'
+uci commit wireless
+/sbin/wifi up >/dev/null 2>&1
+exit 0
